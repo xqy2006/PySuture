@@ -30,6 +30,7 @@ from pysuture.resolver import (
     build_lock_payload,
     resolve_assets,
     validate_pack_composition,
+    validate_pack_runtime_compatibility,
 )
 from pysuture.resources import collect_application_resources
 from pysuture.toolchain import MSVCToolchain, locked_toolchain_mismatches, validate_locked_toolchain
@@ -74,9 +75,12 @@ class CoreTests(unittest.TestCase):
         runtime_metadata = {
             "cpython_version": "3.13.7",
             "cpython_abi": "cp313",
+            "cpython_commit": "b" * 40,
+            "cpython_tag": "v3.13.7",
             "runtime_abi": "staticpython-pack-v1-cp313",
             "staticpython_commit": commit,
             "toolchain": {"platform_toolset": "v143"},
+            "verification": {"status": "passed"},
             "stdlib_top_level_import_names": sorted(
                 set(sys.stdlib_module_names) | {"msvcrt", "winreg", "winsound", "target_only_stdlib"}
             ),
@@ -84,9 +88,13 @@ class CoreTests(unittest.TestCase):
         pack_metadata = {
             "name": "attrs",
             "version": "25.3.0",
+            "cpython_version": "3.13.7",
             "cpython_abi": "cp313",
+            "cpython_commit": "b" * 40,
+            "cpython_tag": "v3.13.7",
             "runtime_abi": "staticpython-pack-v1-cp313",
             "staticpython_commit": commit,
+            "toolchain": {"platform_toolset": "v143"},
             "top_level_import_names": ["attrs"],
             "dependencies": [],
             "dependency_constraints": {},
@@ -95,6 +103,7 @@ class CoreTests(unittest.TestCase):
             "libraries": [],
             "sources": ["src/pack.c"],
             "license": {"status": "complete", "expression": "MIT"},
+            "verification": {"status": "passed"},
         }
         return {
             "schema_version": 1,
@@ -235,6 +244,18 @@ class CoreTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(LockError, "frozen module.*conflicts"):
             validate_pack_composition(runtime, [("first", first), ("second", second)])
+
+    def test_pack_runtime_contract_rejects_missing_locked_dependency(self) -> None:
+        index = self._index()
+        runtime = index["runtimes"]["cp313"]["metadata"]
+        pack = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
+        pack["dependencies"] = ["missing"]
+        with self.assertRaisesRegex(LockError, "dependencies are missing from the lock"):
+            validate_pack_runtime_compatibility(
+                runtime,
+                [("attrs", pack)],
+                staticpython_commit=index["staticpython_commit"],
+            )
 
     def test_dependency_solver_backtracks_across_combined_constraints(self) -> None:
         index = self._index()

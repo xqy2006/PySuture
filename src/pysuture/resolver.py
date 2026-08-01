@@ -46,6 +46,10 @@ class ResolvedAsset:
             "sources": self.metadata.get("sources", []),
             "license": self.metadata.get("license", {}),
             "top_level_import_names": self.metadata.get("top_level_import_names", []),
+            "dependencies": self.metadata.get("dependencies", []),
+            "dependency_constraints": self.metadata.get("dependency_constraints", {}),
+            "conflicts": self.metadata.get("conflicts", []),
+            "verification": self.metadata.get("verification", {}),
         }
         for field in (
             "runtime_abi",
@@ -211,6 +215,59 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
             claim(claimed_resources, resource.get("path"), owner, "resource path")
 
 
+def validate_pack_runtime_compatibility(
+    runtime_metadata: dict,
+    packs: list[tuple[str, dict]],
+    *,
+    staticpython_commit: str,
+) -> None:
+    if runtime_metadata.get("staticpython_commit") != staticpython_commit:
+        raise LockError("runtime SDK was built from a different StaticPython commit")
+    if runtime_metadata.get("verification", {}).get("status") != "passed":
+        raise LockError("runtime SDK is not verified")
+
+    selected_names: dict[str, str] = {}
+    for owner, metadata in packs:
+        key = owner.casefold()
+        if key in selected_names:
+            raise LockError(f"duplicate selected pack name: {owner}")
+        selected_names[key] = owner
+        if metadata.get("name") != owner:
+            raise LockError(f"pack identity mismatch: expected {owner!r}")
+        if metadata.get("staticpython_commit") != staticpython_commit:
+            raise LockError(f"pack {owner} was built from a different StaticPython commit")
+        if metadata.get("verification", {}).get("status") != "passed":
+            raise LockError(f"pack {owner} is not verified")
+        if metadata.get("license", {}).get("status") != "complete":
+            raise LockError(f"pack {owner} has incomplete license metadata")
+        for field in (
+            "runtime_abi",
+            "cpython_abi",
+            "cpython_version",
+            "cpython_commit",
+            "cpython_tag",
+            "toolchain",
+        ):
+            if metadata.get(field) != runtime_metadata.get(field):
+                raise LockError(f"pack {owner} {field} does not match the runtime SDK")
+
+    for owner, metadata in packs:
+        dependencies = metadata.get("dependencies", [])
+        conflicts = metadata.get("conflicts", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(name, str) and name for name in dependencies
+        ):
+            raise LockError(f"pack {owner} has invalid dependency metadata")
+        if not isinstance(conflicts, list) or not all(isinstance(name, str) and name for name in conflicts):
+            raise LockError(f"pack {owner} has invalid conflict metadata")
+        missing = [name for name in dependencies if name.casefold() not in selected_names]
+        if missing:
+            raise LockError(f"pack {owner} dependencies are missing from the lock: {', '.join(missing)}")
+        selected_conflicts = [name for name in conflicts if name.casefold() in selected_names]
+        if selected_conflicts:
+            raise LockError(f"pack {owner} conflicts with {', '.join(selected_conflicts)}")
+
+
 def _solve_pack_dependencies(index: dict, abi: str, requested: dict[str, str]) -> dict[str, ResolvedAsset]:
     initial_constraints = {
         name: tuple([specifier] if specifier else [])
@@ -345,9 +402,15 @@ def resolve_assets(
         conflicts = selected_names.intersection(asset.metadata.get("conflicts", []))
         if conflicts:
             raise LockError(f"pack {asset.name} conflicts with {', '.join(sorted(conflicts))}")
+    selected_metadata = [(asset.name, asset.metadata) for asset in selected.values()]
+    validate_pack_runtime_compatibility(
+        runtime.metadata,
+        selected_metadata,
+        staticpython_commit=str(index.get("staticpython_commit", "")),
+    )
     validate_pack_composition(
         runtime.metadata,
-        [(asset.name, asset.metadata) for asset in selected.values()],
+        selected_metadata,
     )
 
     report.selected_packs = {

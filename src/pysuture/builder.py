@@ -18,7 +18,7 @@ from .errors import BuildError, LockError
 from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
-from .resolver import validate_pack_composition
+from .resolver import validate_pack_composition, validate_pack_runtime_compatibility
 from .toolchain import MSVCToolchain, discover_msvc, validate_locked_toolchain
 
 
@@ -77,10 +77,19 @@ def materialize_assets(lock: dict, *, offline: bool) -> MaterializedAssets:
         if metadata.get("staticpython_commit") != lock["staticpython_commit"]:
             raise BuildError(f"pack {record['name']} was built from a different StaticPython commit")
         packs.append((record, root, metadata))
-    validate_pack_composition(
-        runtime_metadata,
-        [(metadata.get("name", record["name"]), metadata) for record, _root, metadata in packs],
-    )
+    pack_metadata = [
+        (metadata.get("name", record["name"]), metadata)
+        for record, _root, metadata in packs
+    ]
+    try:
+        validate_pack_runtime_compatibility(
+            runtime_metadata,
+            pack_metadata,
+            staticpython_commit=str(lock.get("staticpython_commit", "")),
+        )
+        validate_pack_composition(runtime_metadata, pack_metadata)
+    except LockError as exc:
+        raise BuildError(f"locked StaticPython assets are incompatible: {exc}") from exc
     return MaterializedAssets(runtime_root, runtime_metadata, tuple(packs))
 
 
