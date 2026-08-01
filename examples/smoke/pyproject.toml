@@ -1,0 +1,17 @@
+[project]
+name = "pysuture-smoke-app"
+version = "0.0.0"
+
+[tool.pysuture]
+entry = "app.py"
+python = "3.13"
+mode = "console"
+output = "pysuture-smoke"
+include-modules = []
+include-packages = []
+source-roots = ["."]
+index-url = "runtime-index.v1.json"
+secret-policy = "error"
+data = [{ source = "assets/payload.json", target = "assets/payload.json" }]
+
+[tool.pysuture.packages]
