@@ -127,12 +127,34 @@ def _private_package_modules(package_name: str) -> dict[str, ModuleRecord]:
     modules: dict[str, ModuleRecord] = {}
     if spec.submodule_search_locations:
         for location in spec.submodule_search_locations:
-            root = Path(location)
-            package_root = root.parent
-            discovered = _discover_under_root(package_root, private_dependency=True)
-            for name, record in discovered.items():
-                if name == package_name or name.startswith(package_name + "."):
-                    modules[name] = record
+            root = Path(location).resolve()
+            native_files = sorted(
+                path for path in root.rglob("*")
+                if path.is_file() and path.suffix.casefold() == ".pyd"
+            )
+            if native_files:
+                preview = ", ".join(str(path) for path in native_files[:5])
+                raise AnalysisError(
+                    f"explicit private package {package_name!r} contains native extensions ({preview}); "
+                    "a StaticPython pack is required"
+                )
+            for path in sorted(root.rglob("*.py")):
+                relative = path.relative_to(root)
+                if any(
+                    part in IGNORED_DIRECTORY_NAMES or part.startswith(".")
+                    for part in relative.parts[:-1]
+                ):
+                    continue
+                if relative.name == "__init__.py":
+                    suffix = relative.parent.parts
+                    is_package = True
+                else:
+                    suffix = (*relative.parent.parts, relative.stem)
+                    is_package = False
+                if not all(part.isidentifier() for part in suffix):
+                    continue
+                name = ".".join((package_name, *suffix)) if suffix else package_name
+                modules[name] = ModuleRecord(name, path.resolve(), is_package, root, True)
     elif spec.origin and spec.origin.endswith(".py"):
         path = Path(spec.origin).resolve()
         modules[package_name] = ModuleRecord(package_name, path, False, path.parent, True)

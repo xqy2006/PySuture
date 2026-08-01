@@ -45,7 +45,8 @@ def write_launcher(
         f"    {{{_c_string(unit.module.name)}, {unit.init_symbol}}},"
         for unit in units
     ]
-    builtin_entries.append(f'    {{"__main__", {entry.init_symbol}}},')
+    if entry_module != "__main__":
+        builtin_entries.append(f'    {{"__main__", {entry.init_symbol}}},')
     resource_externs = [f"extern const unsigned char {record['symbol']}[];" for record in resources]
     resource_entries = [
         "    {"

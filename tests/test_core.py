@@ -6,6 +6,7 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 from zipfile import ZipFile
@@ -16,7 +17,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pysuture.analyzer import analyze_project
+from pysuture.analyzer import _private_package_modules, analyze_project
 from pysuture.cache import _safe_extract, sha256_bytes
 from pysuture.cli import main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
@@ -151,6 +152,22 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(LockError, "no verified StaticPython pack"):
             resolve_assets(config, analyze_project(config))
 
+    def test_private_package_scan_is_scoped_and_rejects_native_extensions(self) -> None:
+        package_root = self.root / "site-packages" / "private_demo"
+        package_root.mkdir(parents=True)
+        (package_root / "__init__.py").write_text("from . import helper\n", encoding="utf-8")
+        (package_root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (package_root.parent / "unrelated.py").write_text("VALUE = 2\n", encoding="utf-8")
+        spec = mock.Mock(submodule_search_locations=[str(package_root)], origin=str(package_root / "__init__.py"))
+        with mock.patch("pysuture.analyzer.importlib.util.find_spec", return_value=spec):
+            modules = _private_package_modules("private_demo")
+        self.assertEqual(set(modules), {"private_demo", "private_demo.helper"})
+
+        (package_root / "native_backend.pyd").write_bytes(b"not-a-real-extension")
+        with mock.patch("pysuture.analyzer.importlib.util.find_spec", return_value=spec):
+            with self.assertRaisesRegex(AnalysisError, "contains native extensions"):
+                _private_package_modules("private_demo")
+
     def test_frozen_lock_detects_source_drift(self) -> None:
         self._write_project("import pkg\n")
         config = load_project_config(self.root)
@@ -217,6 +234,33 @@ class CoreTests(unittest.TestCase):
         prepared = next(unit.prepared_source for unit in units if unit.module.name == "app")
         prepared_text = prepared.read_text(encoding="utf-8")
         self.assertIn("freeze_support", prepared_text)
+
+    def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
+        self._write_project("print('ok')\n")
+        (self.root / "app.py").rename(self.root / "__main__.py")
+        project_path = self.root / "pyproject.toml"
+        project_path.write_text(
+            project_path.read_text(encoding="utf-8").replace('entry = "app.py"', 'entry = "__main__.py"'),
+            encoding="utf-8",
+        )
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        units, _warnings = cythonize_modules(
+            report,
+            self.root / ".pysuture" / "dunder-main",
+            installed_cython_version(),
+        )
+        launcher = write_launcher(
+            self.root / ".pysuture" / "dunder-main" / "launcher.c",
+            units=units,
+            entry_module=report.entry_module,
+            entry_callable=None,
+            namespace_packages=report.namespace_packages,
+            pack_symbols=[],
+            resources=[],
+            windowed=False,
+        )
+        self.assertEqual(launcher.read_text(encoding="utf-8").count('{"__main__",'), 1)
 
     def test_init_preserves_existing_pyproject(self) -> None:
         (self.root / "app.py").write_text("pass\n", encoding="utf-8")
