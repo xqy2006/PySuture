@@ -28,6 +28,7 @@ from pysuture.lockfile import validate_lock_for_project, write_lock
 from pysuture.resolver import (
     _solve_pack_dependencies,
     build_lock_payload,
+    load_verified_index,
     resolve_assets,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
@@ -180,6 +181,63 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
+
+    def test_reviewed_catalog_resolves_exact_hashed_index(self) -> None:
+        self._write_project("import attrs\n")
+        reviewed_index = self._index()
+        versions = {
+            "cp311": "3.11.15",
+            "cp312": "3.12.13",
+            "cp313": "3.13.7",
+            "cp314": "3.14.4",
+            "cp315": "3.15.0a8",
+        }
+        base_runtime = reviewed_index["runtimes"]["cp313"]
+        reviewed_index["runtimes"] = {}
+        for abi, version in versions.items():
+            record = json.loads(json.dumps(base_runtime))
+            record["metadata"]["cpython_version"] = version
+            record["metadata"]["cpython_abi"] = abi
+            record["metadata"]["runtime_abi"] = f"staticpython-pack-v1-{abi}"
+            reviewed_index["runtimes"][abi] = record
+
+        index_path = self.root / "reviewed-index.json"
+        index_payload = json.dumps(reviewed_index, sort_keys=True).encode("utf-8")
+        index_path.write_bytes(index_payload)
+        catalog = {
+            "schema_version": 1,
+            "kind": "pysuture-reviewed-runtime-catalog",
+            "status": "reviewed",
+            "target_platform": "windows-x64",
+            "staticpython_commit": "a" * 40,
+            "index_url": index_path.as_posix(),
+            "index_sha256": sha256_bytes(index_payload),
+            "runtimes": {
+                abi: {
+                    "cpython_version": record["metadata"]["cpython_version"],
+                    "runtime_abi": record["metadata"]["runtime_abi"],
+                    "sha256": record["sha256"],
+                }
+                for abi, record in reviewed_index["runtimes"].items()
+            },
+            "pack_asset_count": 1,
+            "validation": {
+                "status": "passed",
+                "python_series": ["3.11", "3.12", "3.13", "3.14", "3.15"],
+                "modes": ["console", "windowed"],
+            },
+        }
+        catalog_path = self.root / "runtime-catalog.lock.json"
+        catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+        config = replace(load_project_config(self.root), index_url=str(catalog_path))
+        loaded, digest = load_verified_index(config)
+        self.assertEqual(loaded["staticpython_commit"], "a" * 40)
+        self.assertEqual(digest, catalog["index_sha256"])
+
+        catalog["index_sha256"] = "0" * 64
+        catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+        with self.assertRaisesRegex(LockError, "SHA-256 mismatch"):
+            load_verified_index(config)
 
     def test_resolver_uses_target_runtime_stdlib_inventory(self) -> None:
         self._write_project("import target_only_stdlib\n")

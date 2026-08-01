@@ -3,7 +3,7 @@ from __future__ import annotations
 DEFAULT_PYTHON_SERIES = "3.13"
 DEFAULT_CYTHON_VERSION = "3.2.9"
 DEFAULT_INDEX_URL = (
-    "github+latest://xqy2006/StaticPython/runtime-index.v1.json"
+    "https://raw.githubusercontent.com/xqy2006/PySuture/master/runtime-catalog.lock.json"
 )
 LOCK_SCHEMA_VERSION = 1
 CONFIG_SCHEMA_VERSION = 1

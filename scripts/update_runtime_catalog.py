@@ -23,6 +23,9 @@ def main() -> int:
     runtime_tag = index["runtime_release_tag"]
     payload = {
         "schema_version": 1,
+        "kind": "pysuture-reviewed-runtime-catalog",
+        "status": "reviewed",
+        "target_platform": "windows-x64",
         "staticpython_repository": args.repository,
         "staticpython_commit": index["staticpython_commit"],
         "index_url": (
@@ -38,11 +41,24 @@ def main() -> int:
             }
             for abi, record in sorted(runtimes.items())
         },
-        "pack_count": sum(
+        "pack_asset_count": sum(
             len(by_abi)
             for versions in index.get("packs", {}).values()
             for by_abi in versions.values()
         ),
+        "validation": {
+            "status": "passed",
+            "workflow": "sync-staticpython",
+            "python_series": ["3.11", "3.12", "3.13", "3.14", "3.15"],
+            "modes": ["console", "windowed"],
+            "checks": [
+                "unicode-argv",
+                "read-only-resources",
+                "multiprocessing",
+                "no-runtime-extraction",
+                "pe-dependencies",
+            ],
+        },
     }
     args.output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

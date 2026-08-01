@@ -63,9 +63,10 @@ and credential-like files are rejected by default.
 - `pysuture analyze` prints the reachable module graph, selected StaticPython
   packs, unresolved dynamic imports, and unsupported native extensions. Use
   `--json` for automation.
-- `pysuture lock` creates `pysuture.lock` from the latest verified immutable
-  StaticPython index. An existing lock is reused; only `lock --update` changes
-  the runtime or packages.
+- `pysuture lock` creates `pysuture.lock` from PySuture's reviewed runtime
+  catalog, which points to an immutable, hash-pinned StaticPython index only
+  after all five Python targets pass the PySuture E2E matrix. An existing lock
+  is reused; only `lock --update` changes the runtime or packages.
 - `pysuture build` Cythonizes, compiles, links, and audits the executable.
   `--offline` forbids downloads and `--frozen-lock` additionally rejects project
   source drift, making it suitable for CI.
@@ -93,6 +94,10 @@ arguments pass through unchanged.
 
 StaticPython's `full` profile is only a scheduled all-library link/conflict
 regression. PySuture never downloads it, links it, or falls back to it.
+The default catalog is updated through a reviewable PR; user builds therefore
+do not follow StaticPython `master` or a newly published but not yet
+PySuture-validated prerelease. An explicit `index-url` remains available for
+integration development and offline mirrors.
 
 ## License
 

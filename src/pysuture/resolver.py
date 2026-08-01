@@ -10,7 +10,7 @@ from packaging.version import InvalidVersion, Version
 from .analyzer import AnalysisReport
 from .cache import fetch_index, sha256_bytes
 from .config import ProjectConfig
-from .constants import DEFAULT_CYTHON_VERSION, SUPPORTED_PLATFORM
+from .constants import DEFAULT_CYTHON_VERSION, SUPPORTED_PLATFORM, SUPPORTED_PYTHON_SERIES
 from .errors import LockError
 
 
@@ -77,20 +77,101 @@ class Resolution:
     unresolved_imports: tuple[str, ...]
 
 
-def load_verified_index(config: ProjectConfig, *, offline: bool = False) -> tuple[dict, str]:
-    payload, _cache_path = fetch_index(config.index_url, offline=offline)
-    digest = sha256_bytes(payload)
+def _json_object(payload: bytes, label: str) -> dict:
     try:
-        index = json.loads(payload.decode("utf-8"))
+        document = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LockError(f"StaticPython index is not valid UTF-8 JSON: {exc}") from exc
+        raise LockError(f"{label} is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise LockError(f"{label} must be a JSON object")
+    return document
+
+
+def _validate_reviewed_catalog(catalog: dict, index: dict, index_digest: str) -> None:
+    if catalog.get("schema_version") != 1:
+        raise LockError("unsupported PySuture reviewed catalog schema")
+    if catalog.get("status") != "reviewed":
+        raise LockError("PySuture runtime catalog is not marked reviewed")
+    if catalog.get("target_platform") != SUPPORTED_PLATFORM:
+        raise LockError(f"PySuture runtime catalog target is not {SUPPORTED_PLATFORM}")
+    expected_digest = catalog.get("index_sha256")
+    if not isinstance(expected_digest, str) or len(expected_digest) != 64 or any(
+        character not in "0123456789abcdefABCDEF" for character in expected_digest
+    ):
+        raise LockError("PySuture runtime catalog has an invalid index SHA-256")
+    if index_digest != expected_digest.lower():
+        raise LockError(
+            "reviewed StaticPython index SHA-256 mismatch: "
+            f"expected {expected_digest.lower()}, got {index_digest}"
+        )
+    if index.get("staticpython_commit") != catalog.get("staticpython_commit"):
+        raise LockError("reviewed catalog and StaticPython index commits do not match")
+
+    expected_abis = {"cp" + series.replace(".", "") for series in SUPPORTED_PYTHON_SERIES}
+    catalog_runtimes = catalog.get("runtimes")
+    index_runtimes = index.get("runtimes")
+    if not isinstance(catalog_runtimes, dict) or set(catalog_runtimes) != expected_abis:
+        raise LockError("reviewed catalog must contain exactly CPython 3.11 through 3.15")
+    if not isinstance(index_runtimes, dict) or set(index_runtimes) != expected_abis:
+        raise LockError("reviewed StaticPython index must contain exactly CPython 3.11 through 3.15")
+    for abi in sorted(expected_abis):
+        summary = catalog_runtimes[abi]
+        record = index_runtimes[abi]
+        if not isinstance(summary, dict) or not isinstance(record, dict):
+            raise LockError(f"reviewed catalog runtime {abi} is invalid")
+        metadata = record.get("metadata", {})
+        expected = {
+            "cpython_version": metadata.get("cpython_version"),
+            "runtime_abi": metadata.get("runtime_abi"),
+            "sha256": record.get("sha256"),
+        }
+        if summary != expected:
+            raise LockError(f"reviewed catalog runtime summary does not match {abi}")
+
+    actual_pack_assets = sum(
+        len(by_abi)
+        for versions in index.get("packs", {}).values()
+        if isinstance(versions, dict)
+        for by_abi in versions.values()
+        if isinstance(by_abi, dict)
+    )
+    if catalog.get("pack_asset_count") != actual_pack_assets:
+        raise LockError("reviewed catalog pack asset count does not match the StaticPython index")
+    validation = catalog.get("validation")
+    if not isinstance(validation, dict) or validation.get("status") != "passed":
+        raise LockError("reviewed catalog does not record a passing PySuture E2E validation")
+    if validation.get("python_series") != list(SUPPORTED_PYTHON_SERIES):
+        raise LockError("reviewed catalog has an incomplete Python validation matrix")
+    if validation.get("modes") != ["console", "windowed"]:
+        raise LockError("reviewed catalog has an incomplete launcher validation matrix")
+
+
+def load_verified_index_url(index_url: str, *, offline: bool = False) -> tuple[dict, str]:
+    payload, _cache_path = fetch_index(index_url, offline=offline)
+    digest = sha256_bytes(payload)
+    index = _json_object(payload, "StaticPython index or PySuture reviewed catalog")
+    if index.get("kind") == "pysuture-reviewed-runtime-catalog":
+        reviewed_url = index.get("index_url")
+        if not isinstance(reviewed_url, str) or not reviewed_url or reviewed_url == index_url:
+            raise LockError("PySuture runtime catalog has an invalid immutable index URL")
+        catalog = index
+        payload, _cache_path = fetch_index(reviewed_url, offline=offline)
+        digest = sha256_bytes(payload)
+        index = _json_object(payload, "reviewed StaticPython index")
+        _validate_reviewed_catalog(catalog, index, digest)
     if not isinstance(index, dict) or index.get("schema_version") != 1:
         raise LockError("unsupported StaticPython runtime index schema")
+    if index.get("kind") != "staticpython-runtime-index":
+        raise LockError("document is not a StaticPython runtime index")
     if index.get("status") != "verified":
         raise LockError("StaticPython index is not marked verified")
     if index.get("target_platform") != SUPPORTED_PLATFORM:
         raise LockError(f"StaticPython index target is not {SUPPORTED_PLATFORM}")
     return index, digest
+
+
+def load_verified_index(config: ProjectConfig, *, offline: bool = False) -> tuple[dict, str]:
+    return load_verified_index_url(config.index_url, offline=offline)
 
 
 def _asset(name: str, version: str, record: dict) -> ResolvedAsset:
