@@ -88,23 +88,36 @@ def _developer_environment(installation: Path) -> dict[str, str]:
     devcmd = installation / "Common7" / "Tools" / "VsDevCmd.bat"
     if not devcmd.is_file():
         raise BuildError(f"Visual Studio developer command script is missing: {devcmd}")
-    command = f'"{devcmd}" -no_logo -arch=amd64 -host_arch=amd64 && set'
-    result = subprocess.run(
-        ["cmd.exe", "/d", "/s", "/c", command],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    # Passing this embedded command as an argv element makes Python quote the
+    # inner batch-file path for CreateProcess instead of for cmd.exe.  Invoke
+    # it through the Windows command shell; `call` then guarantees execution
+    # continues after the batch file so `set` can print the new environment.
+    command = f'call "{devcmd}" -no_logo -arch=amd64 -host_arch=amd64 && set'
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError("Visual Studio developer environment initialization timed out") from exc
     if result.returncode != 0:
         raise BuildError(f"could not initialize the VS 2022 environment: {result.stderr.strip()}")
-    environment = dict(os.environ)
+    # Windows environment names are case-insensitive, while a Python dict is
+    # not.  VsDevCmd commonly prints `Path=` even when the inherited mapping
+    # contains `PATH=`, leaving two entries and making discovery use the stale
+    # one unless keys are normalized.
+    environment = {name.upper(): value for name, value in os.environ.items()}
     for line in result.stdout.splitlines():
         name, separator, value = line.partition("=")
         if separator and name:
-            environment[name] = value
+            environment[name.upper()] = value
     return environment
 
 
@@ -128,8 +141,8 @@ def discover_msvc() -> MSVCToolchain:
         lib=_tool("lib.exe", environment),
         dumpbin=_tool("dumpbin.exe", environment),
         msbuild=_tool("msbuild.exe", environment),
-        visual_studio_version=environment.get("VisualStudioVersion"),
-        windows_sdk_version=environment.get("WindowsSDKVersion"),
+        visual_studio_version=environment.get("VISUALSTUDIOVERSION"),
+        windows_sdk_version=environment.get("WINDOWSSDKVERSION"),
     )
 
 
