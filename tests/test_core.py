@@ -295,6 +295,33 @@ class CoreTests(unittest.TestCase):
             "c": "1.5",
         })
 
+    def test_dependency_solver_accepts_pack_cycles(self) -> None:
+        index = self._index()
+
+        def record(name: str, dependencies: list[str]) -> dict:
+            return {
+                "filename": f"{name}-1.0.zip",
+                "url": f"https://example.invalid/{name}-1.0.zip",
+                "sha256": name * 64,
+                "size": 1,
+                "metadata": {
+                    "name": name,
+                    "version": "1.0",
+                    "runtime_abi": "staticpython-pack-v1-cp313",
+                    "descriptor_symbol": f"StaticPython_Pack_{name}",
+                    "dependencies": dependencies,
+                    "dependency_constraints": {},
+                    "conflicts": [],
+                },
+            }
+
+        index["packs"] = {
+            "a": {"1.0": {"cp313": record("a", ["b"])}},
+            "b": {"1.0": {"cp313": record("b", ["a"])}},
+        }
+        selected = _solve_pack_dependencies(index, "cp313", {"a": ""})
+        self.assertEqual(set(selected), {"a", "b"})
+
     def test_resolver_rejects_unknown_dependency(self) -> None:
         self._write_project("import missing_dependency\n")
         config = load_project_config(self.root)

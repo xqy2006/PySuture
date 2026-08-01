@@ -89,6 +89,11 @@ jobs:
           New-Item -ItemType Directory -Force $work | Out-Null
           Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
           $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
           & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
           if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
@@ -97,8 +102,20 @@ jobs:
         if: matrix.mode == 'windowed'
         shell: pwsh
         run: |
-          $process = Start-Process ".\examples\smoke\dist\smoke-${{ matrix.python }}-windowed.exe" -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}-windowed"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-windowed.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-windowed.exe" $exe
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          $process = Start-Process $exe -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
 
   propose-update:
     needs: [candidate, e2e]
