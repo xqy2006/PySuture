@@ -25,8 +25,14 @@ from pysuture.cythonizer import cythonize_modules, installed_cython_version
 from pysuture.errors import AnalysisError, BuildError, LockError
 from pysuture.launcher import write_launcher
 from pysuture.lockfile import validate_lock_for_project, write_lock
-from pysuture.resolver import build_lock_payload, resolve_assets
+from pysuture.resolver import (
+    _solve_pack_dependencies,
+    build_lock_payload,
+    resolve_assets,
+    validate_pack_composition,
+)
 from pysuture.resources import collect_application_resources
+from pysuture.toolchain import MSVCToolchain, locked_toolchain_mismatches, validate_locked_toolchain
 
 
 class CoreTests(unittest.TestCase):
@@ -71,6 +77,9 @@ class CoreTests(unittest.TestCase):
             "runtime_abi": "staticpython-pack-v1-cp313",
             "staticpython_commit": commit,
             "toolchain": {"platform_toolset": "v143"},
+            "stdlib_top_level_import_names": sorted(
+                set(sys.stdlib_module_names) | {"msvcrt", "winreg", "winsound", "target_only_stdlib"}
+            ),
         }
         pack_metadata = {
             "name": "attrs",
@@ -135,6 +144,23 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(report.dynamic_gaps), 1)
         self.assertEqual(report.dynamic_gaps[0].module, "app")
 
+    def test_explicit_dynamic_module_selects_its_pack(self) -> None:
+        self._write_project("import importlib\nname = 'attrs'\nimportlib.import_module(name)\n")
+        project_path = self.root / "pyproject.toml"
+        project_path.write_text(
+            project_path.read_text(encoding="utf-8").replace(
+                'include-modules = ["ns.child.module"]',
+                'include-modules = ["ns.child.module", "attrs.plugins"]',
+            ),
+            encoding="utf-8",
+        )
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        self.assertIn("attrs", report.external_imports)
+        self.assertEqual([(pack.name, pack.version) for pack in resolve_assets(config, report).packs], [
+            ("attrs", "25.3.0")
+        ])
+
     def test_resolver_selects_minimum_verified_pack(self) -> None:
         self._write_project("import attrs\n")
         config = load_project_config(self.root)
@@ -145,6 +171,108 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
+
+    def test_resolver_uses_target_runtime_stdlib_inventory(self) -> None:
+        self._write_project("import target_only_stdlib\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        resolution = resolve_assets(config, report)
+        self.assertEqual(resolution.packs, ())
+        payload = build_lock_payload(config, report, resolution)
+        self.assertIn("target_only_stdlib", payload["runtime"]["stdlib_top_level_import_names"])
+
+    def test_target_runtime_builtin_is_not_an_unsupported_host_extension(self) -> None:
+        self._write_project("import _ssl\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        self.assertIn("_ssl", report.unsupported_native_extensions)
+        self.assertEqual(resolve_assets(config, report).packs, ())
+
+    def test_locked_toolchain_requires_exact_recorded_versions(self) -> None:
+        toolchain = MSVCToolchain(
+            installation_path=self.root,
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version="17.0",
+            vscmd_version="17.14.19",
+            vc_tools_version="14.44.35207",
+            windows_sdk_version="10.0.26100.0\\",
+        )
+        expected = {
+            "visual_studio_version": "17.0",
+            "vscmd_version": "17.14.19",
+            "vc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+        }
+        self.assertEqual(locked_toolchain_mismatches(expected, toolchain), {})
+        validate_locked_toolchain(expected, toolchain)
+        expected["vc_tools_version"] = "14.43.34808"
+        with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
+            validate_locked_toolchain(expected, toolchain)
+
+    def test_pack_composition_rejects_link_time_table_collisions(self) -> None:
+        runtime = {
+            "frozen_module_names": ["json"],
+            "builtin_module_registrations": [{"name": "_ssl"}],
+        }
+        first = {
+            "descriptor_symbol": "StaticPython_Pack_first",
+            "frozen_modules": ["demo.shared"],
+            "builtin_modules": [],
+            "resources": [{"path": "demo/data.bin"}],
+        }
+        second = {
+            "descriptor_symbol": "StaticPython_Pack_second",
+            "frozen_modules": ["demo.shared"],
+            "builtin_modules": [],
+            "resources": [],
+        }
+        with self.assertRaisesRegex(LockError, "frozen module.*conflicts"):
+            validate_pack_composition(runtime, [("first", first), ("second", second)])
+
+    def test_dependency_solver_backtracks_across_combined_constraints(self) -> None:
+        index = self._index()
+
+        def record(name: str, version: str, dependencies: list[str], constraint: str = "") -> dict:
+            return {
+                "filename": f"{name}-{version}.zip",
+                "url": f"https://example.invalid/{name}-{version}.zip",
+                "sha256": (name[0] * 64),
+                "size": 1,
+                "metadata": {
+                    "name": name,
+                    "version": version,
+                    "runtime_abi": "staticpython-pack-v1-cp313",
+                    "descriptor_symbol": f"StaticPython_Pack_{name}",
+                    "dependencies": dependencies,
+                    "dependency_constraints": {"c": constraint} if constraint else {},
+                    "conflicts": [],
+                },
+            }
+
+        index["packs"] = {
+            "a": {
+                "2.0": {"cp313": record("a", "2.0", ["c"], ">=2")},
+                "1.0": {"cp313": record("a", "1.0", ["c"], "<2")},
+            },
+            "b": {"1.0": {"cp313": record("b", "1.0", ["c"], "<2")}},
+            "c": {
+                "2.5": {"cp313": record("c", "2.5", [])},
+                "1.5": {"cp313": record("c", "1.5", [])},
+            },
+        }
+        selected = _solve_pack_dependencies(index, "cp313", {"a": "", "b": ""})
+        self.assertEqual({name: asset.version for name, asset in selected.items()}, {
+            "a": "1.0",
+            "b": "1.0",
+            "c": "1.5",
+        })
 
     def test_resolver_rejects_unknown_dependency(self) -> None:
         self._write_project("import missing_dependency\n")
@@ -228,6 +356,9 @@ class CoreTests(unittest.TestCase):
         text = launcher.read_text(encoding="utf-8")
         self.assertIn("config.parse_argv = 0", text)
         self.assertIn("--multiprocessing-fork", text)
+        self.assertIn("return argc == 4", text)
+        self.assertIn('L"parent_pid="', text)
+        self.assertIn('L"pipe_handle="', text)
         self.assertIn("wmain(int argc", text)
         self.assertNotIn("Py_Main(", text)
         self.assertNotIn("Py_RunMain(", text)

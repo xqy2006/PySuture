@@ -320,6 +320,11 @@ def analyze_project(config: ProjectConfig) -> AnalysisReport:
 
     reachable_modules = {name: module for name, module in modules.items() if name in reachable}
     external = set().union(*(external_by_module.get(name, set()) for name in reachable))
+    external.update(
+        name.split(".", 1)[0]
+        for name in config.include_modules
+        if not _local_targets(name, modules)
+    )
     dynamic_imports = set(config.include_modules).union(
         *(dynamic_by_module.get(name, set()) for name in reachable)
     )

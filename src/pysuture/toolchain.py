@@ -22,7 +22,19 @@ class MSVCToolchain:
     dumpbin: Path
     msbuild: Path
     visual_studio_version: str | None
+    vscmd_version: str | None
+    vc_tools_version: str | None
     windows_sdk_version: str | None
+
+    def identity(self) -> dict:
+        return {
+            "visual_studio_version": self.visual_studio_version,
+            "vscmd_version": self.vscmd_version,
+            "vc_tools_version": self.vc_tools_version,
+            "windows_sdk_version": self.windows_sdk_version,
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+        }
 
     def fingerprint(self) -> dict:
         result = subprocess.run(
@@ -36,13 +48,48 @@ class MSVCToolchain:
             check=False,
         )
         return {
-            "visual_studio_version": self.visual_studio_version,
-            "windows_sdk_version": self.windows_sdk_version,
+            **self.identity(),
             "cl_path": str(self.cl),
             "cl_banner": result.stdout.strip(),
-            "platform_toolset": "v143",
-            "runtime_library": "MultiThreaded",
         }
+
+
+def _normalized_identity_value(value: object) -> str:
+    return str(value or "").strip().rstrip("\\/").casefold()
+
+
+def locked_toolchain_mismatches(expected: dict, actual: MSVCToolchain) -> dict[str, dict[str, str | None]]:
+    if not isinstance(expected, dict):
+        raise BuildError("pysuture.lock toolchain must be an object")
+    actual_identity = actual.identity()
+    mismatches = {}
+    for field in (
+        "visual_studio_version",
+        "vscmd_version",
+        "vc_tools_version",
+        "windows_sdk_version",
+        "platform_toolset",
+        "runtime_library",
+    ):
+        expected_value = expected.get(field)
+        if expected_value is None or expected_value == "":
+            continue
+        if not isinstance(expected_value, str):
+            raise BuildError(f"pysuture.lock toolchain field {field} must be a string")
+        actual_value = actual_identity.get(field)
+        if _normalized_identity_value(expected_value) != _normalized_identity_value(actual_value):
+            mismatches[field] = {"expected": str(expected_value), "actual": actual_value}
+    return mismatches
+
+
+def validate_locked_toolchain(expected: dict, actual: MSVCToolchain) -> None:
+    mismatches = locked_toolchain_mismatches(expected, actual)
+    if mismatches:
+        details = ", ".join(
+            f"{field}={values['actual']!r} (locked {values['expected']!r})"
+            for field, values in sorted(mismatches.items())
+        )
+        raise BuildError(f"installed MSVC toolchain does not match pysuture.lock: {details}")
 
 
 def _vswhere_path() -> Path | None:
@@ -142,6 +189,8 @@ def discover_msvc() -> MSVCToolchain:
         dumpbin=_tool("dumpbin.exe", environment),
         msbuild=_tool("msbuild.exe", environment),
         visual_studio_version=environment.get("VISUALSTUDIOVERSION"),
+        vscmd_version=environment.get("VSCMD_VER"),
+        vc_tools_version=environment.get("VCTOOLSVERSION"),
         windows_sdk_version=environment.get("WINDOWSSDKVERSION"),
     )
 
@@ -180,13 +229,16 @@ def doctor_report(lock: dict | None = None) -> dict:
         checks.append({"name": "cache", "status": "passed", "detail": str(cache)})
     if lock is not None:
         locked_toolchain = lock.get("toolchain", {})
-        expected = locked_toolchain.get("platform_toolset")
-        actual = "v143" if toolchain is not None else None
+        mismatches = (
+            locked_toolchain_mismatches(locked_toolchain, toolchain)
+            if toolchain is not None
+            else {"toolchain": {"expected": "available", "actual": None}}
+        )
         checks.append(
             {
-                "name": "locked-toolset",
-                "status": "passed" if expected in {None, actual} else "failed",
-                "detail": {"expected": expected, "actual": actual},
+                "name": "locked-toolchain",
+                "status": "passed" if not mismatches else "failed",
+                "detail": mismatches or toolchain.identity(),
             }
         )
     return {

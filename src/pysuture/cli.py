@@ -24,12 +24,17 @@ def _project_root(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def _require_no_dynamic_gaps(report: AnalysisReport) -> None:
-    if not report.dynamic_gaps:
+def _unresolved_dynamic_gaps(report: AnalysisReport, config: ProjectConfig):
+    return () if config.include_modules else report.dynamic_gaps
+
+
+def _require_no_dynamic_gaps(report: AnalysisReport, config: ProjectConfig) -> None:
+    gaps = _unresolved_dynamic_gaps(report, config)
+    if not gaps:
         return
     previews = [
         f"{gap.module}:{gap.line} ({gap.expression})"
-        for gap in report.dynamic_gaps[:10]
+        for gap in gaps[:10]
     ]
     raise AnalysisError(
         "dynamic imports could not be resolved: "
@@ -39,7 +44,7 @@ def _require_no_dynamic_gaps(report: AnalysisReport) -> None:
 
 
 def _create_lock(config: ProjectConfig, report: AnalysisReport, *, offline: bool) -> tuple[Path, dict]:
-    _require_no_dynamic_gaps(report)
+    _require_no_dynamic_gaps(report, config)
     resolution = resolve_assets(config, report, offline=offline)
     payload = build_lock_payload(config, report, resolution)
     return write_lock(config.root, payload), payload
@@ -81,6 +86,7 @@ def command_analyze(args: argparse.Namespace) -> int:
         resolution = None
         resolution_error = str(exc)
     payload = report.as_dict()
+    unresolved_dynamic_gaps = _unresolved_dynamic_gaps(report, config)
     if resolution is not None:
         payload["runtime"] = {
             "version": resolution.runtime.version,
@@ -92,7 +98,7 @@ def command_analyze(args: argparse.Namespace) -> int:
         ]
     if resolution_error:
         payload["resolution_error"] = resolution_error
-    payload["status"] = "incomplete" if report.dynamic_gaps or resolution_error else "ready"
+    payload["status"] = "incomplete" if unresolved_dynamic_gaps or resolution_error else "ready"
     if args.json:
         _json(payload)
     else:
@@ -103,12 +109,13 @@ def command_analyze(args: argparse.Namespace) -> int:
         if resolution is not None:
             print("selected packs: " + (", ".join(f"{asset.name}=={asset.version}" for asset in resolution.packs) or "<none>"))
         if report.dynamic_gaps:
-            print("dynamic import gaps:")
+            label = "dynamic import sites covered by explicit includes:" if not unresolved_dynamic_gaps else "dynamic import gaps:"
+            print(label)
             for gap in report.dynamic_gaps:
                 print(f"  {gap.path}:{gap.line}: {gap.expression}")
         if resolution_error:
             print(f"resolution: {resolution_error}")
-    return 1 if report.dynamic_gaps or resolution_error else 0
+    return 1 if unresolved_dynamic_gaps or resolution_error else 0
 
 
 def command_lock(args: argparse.Namespace) -> int:
@@ -116,10 +123,12 @@ def command_lock(args: argparse.Namespace) -> int:
     if args.python:
         config = replace(config, python=args.python)
     report = analyze_project(config)
+    _require_no_dynamic_gaps(report, config)
     path = lock_path(config.root)
     if path.exists() and not args.update:
         payload = load_lock(config.root)
         validate_lock_for_project(payload, report, frozen=False)
+        _validate_locked_imports(payload, report, config)
         print(f"lock unchanged: {path}")
         return 0
     path, payload = _create_lock(config, report, offline=args.offline)
@@ -140,7 +149,9 @@ def _validate_locked_imports(lock: dict, report: AnalysisReport, config: Project
 
     missing = [
         name for name in report.external_imports
-        if not _is_stdlib(name) and name not in provided and name not in config.include_packages
+        if not _is_stdlib(name, lock.get("runtime", {}))
+        and name not in provided
+        and name not in config.include_packages
     ]
     if missing:
         raise LockError(
@@ -153,7 +164,7 @@ def _validate_locked_imports(lock: dict, report: AnalysisReport, config: Project
 def command_build(args: argparse.Namespace) -> int:
     config = _apply_build_overrides(load_project_config(args.root), args)
     report = analyze_project(config)
-    _require_no_dynamic_gaps(report)
+    _require_no_dynamic_gaps(report, config)
     path = lock_path(config.root)
     if not path.exists():
         if args.frozen_lock:

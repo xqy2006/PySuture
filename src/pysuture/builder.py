@@ -18,7 +18,8 @@ from .errors import BuildError, LockError
 from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
-from .toolchain import MSVCToolchain, discover_msvc
+from .resolver import validate_pack_composition
+from .toolchain import MSVCToolchain, discover_msvc, validate_locked_toolchain
 
 
 RUNTIME_METADATA_PATH = Path("metadata") / "runtime-sdk.v1.json"
@@ -61,6 +62,8 @@ def materialize_assets(lock: dict, *, offline: bool) -> MaterializedAssets:
             )
     if runtime_metadata.get("staticpython_commit") != lock.get("staticpython_commit"):
         raise BuildError("runtime SDK StaticPython commit does not match pysuture.lock")
+    if runtime_metadata.get("toolchain") != lock.get("toolchain"):
+        raise BuildError("runtime SDK toolchain metadata does not match pysuture.lock")
 
     packs = []
     for record in lock.get("packs", []):
@@ -74,6 +77,10 @@ def materialize_assets(lock: dict, *, offline: bool) -> MaterializedAssets:
         if metadata.get("staticpython_commit") != lock["staticpython_commit"]:
             raise BuildError(f"pack {record['name']} was built from a different StaticPython commit")
         packs.append((record, root, metadata))
+    validate_pack_composition(
+        runtime_metadata,
+        [(metadata.get("name", record["name"]), metadata) for record, _root, metadata in packs],
+    )
     return MaterializedAssets(runtime_root, runtime_metadata, tuple(packs))
 
 
@@ -278,6 +285,7 @@ def build_executable(
         raise BuildError("output must be a filename stem")
     assets = materialize_assets(lock, offline=offline)
     toolchain = discover_msvc()
+    validate_locked_toolchain(lock.get("toolchain", {}), toolchain)
     resources, resource_warnings = collect_application_resources(config)
     resources.extend(_license_resources(assets))
     resources.sort(key=lambda item: item.target)
@@ -294,6 +302,7 @@ def build_executable(
     pack_symbols = []
     pack_sources: list[Path] = []
     pack_libraries: list[Path] = []
+    pack_libraries_by_name: dict[str, tuple[Path, str]] = {}
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
     for locked_record, pack_root, metadata in assets.packs:
@@ -306,14 +315,27 @@ def build_executable(
         library_by_name = {}
         for library_name in metadata.get("libraries", []):
             path = _safe_member(pack_root, f"lib/{library_name}")
-            library_by_name[library_name.casefold()] = path
-            pack_libraries.append(path)
+            key = str(library_name).casefold()
+            digest = sha256_file(path)
+            previous = pack_libraries_by_name.get(key)
+            if previous is not None and previous[1] != digest:
+                raise BuildError(
+                    f"selected packs contain different payloads for native library {library_name}"
+                )
+            if previous is None:
+                pack_libraries_by_name[key] = (path, digest)
+                pack_libraries.append(path)
+                library_by_name[key] = path
+            else:
+                library_by_name[key] = previous[0]
         for library_name in metadata.get("wholearchive", []):
             path = library_by_name.get(str(library_name).casefold())
             if path is None:
                 raise BuildError(f"pack {locked_record['name']} wholearchive library is missing: {library_name}")
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
+
+    wholearchive_paths = list(dict.fromkeys(wholearchive_paths))
 
     launcher = write_launcher(
         source_dir / "launcher.c",

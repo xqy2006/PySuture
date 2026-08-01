@@ -57,6 +57,7 @@ class ResolvedAsset:
             "library_directory",
             "link_libraries",
             "system_libraries",
+            "stdlib_top_level_import_names",
         ):
             if field in self.metadata:
                 record[field] = self.metadata[field]
@@ -148,8 +149,147 @@ def _top_level_map(index: dict, abi: str) -> dict[str, set[str]]:
     return mapping
 
 
-def _is_stdlib(name: str) -> bool:
+def _is_stdlib(name: str, runtime_metadata: dict | None = None) -> bool:
+    if runtime_metadata is not None and "stdlib_top_level_import_names" in runtime_metadata:
+        names = runtime_metadata.get("stdlib_top_level_import_names")
+        if not isinstance(names, list) or not all(isinstance(item, str) and item for item in names):
+            raise LockError("runtime SDK stdlib_top_level_import_names must be a list of module names")
+        return name in names
+    # Compatibility for indexes produced before StaticPython published the
+    # target runtime's exact frozen/builtin module inventory.
     return name in sys.stdlib_module_names or name in WINDOWS_STDLIB_MODULES
+
+
+def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dict]]) -> None:
+    claimed_frozen: dict[str, str] = {}
+    claimed_builtins: dict[str, str] = {"_staticpython_resource_store": "runtime SDK"}
+    claimed_resources: dict[str, str] = {}
+    claimed_descriptors: dict[str, str] = {}
+
+    runtime_frozen = runtime_metadata.get("frozen_module_names", [])
+    if not isinstance(runtime_frozen, list):
+        raise LockError("runtime SDK frozen_module_names must be a list")
+    for module_name in runtime_frozen:
+        if isinstance(module_name, str) and module_name:
+            claimed_frozen[module_name] = "runtime SDK"
+    runtime_builtins = runtime_metadata.get("builtin_module_registrations", [])
+    if not isinstance(runtime_builtins, list):
+        raise LockError("runtime SDK builtin_module_registrations must be a list")
+    for registration in runtime_builtins:
+        if isinstance(registration, dict) and isinstance(registration.get("name"), str):
+            claimed_builtins[registration["name"]] = "runtime SDK"
+
+    def claim(table: dict[str, str], value: object, owner: str, kind: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise LockError(f"pack {owner} has an invalid {kind}")
+        previous = table.get(value)
+        if previous is not None:
+            raise LockError(f"pack {owner} {kind} {value!r} conflicts with {previous}")
+        table[value] = owner
+
+    for owner, metadata in packs:
+        descriptor = metadata.get("descriptor_symbol")
+        claim(claimed_descriptors, descriptor, owner, "descriptor symbol")
+        frozen_modules = metadata.get("frozen_modules", [])
+        builtin_modules = metadata.get("builtin_modules", [])
+        resources = metadata.get("resources", [])
+        if not isinstance(frozen_modules, list):
+            raise LockError(f"pack {owner} frozen_modules must be a list")
+        if not isinstance(builtin_modules, list):
+            raise LockError(f"pack {owner} builtin_modules must be a list")
+        if not isinstance(resources, list):
+            raise LockError(f"pack {owner} resources must be a list")
+        for module_name in frozen_modules:
+            claim(claimed_frozen, module_name, owner, "frozen module")
+        for registration in builtin_modules:
+            if not isinstance(registration, dict):
+                raise LockError(f"pack {owner} has an invalid builtin module registration")
+            claim(claimed_builtins, registration.get("name"), owner, "builtin module")
+        for resource in resources:
+            if not isinstance(resource, dict):
+                raise LockError(f"pack {owner} has an invalid resource record")
+            claim(claimed_resources, resource.get("path"), owner, "resource path")
+
+
+def _solve_pack_dependencies(index: dict, abi: str, requested: dict[str, str]) -> dict[str, ResolvedAsset]:
+    initial_constraints = {
+        name: tuple([specifier] if specifier else [])
+        for name, specifier in requested.items()
+    }
+    failures: list[str] = []
+
+    def rendered(constraints: tuple[str, ...]) -> str:
+        return ",".join(item for item in constraints if item)
+
+    def version_satisfies(asset: ResolvedAsset, constraints: tuple[str, ...]) -> bool:
+        try:
+            return Version(asset.version) in SpecifierSet(rendered(constraints))
+        except (InvalidSpecifier, InvalidVersion) as exc:
+            raise LockError(f"invalid locked dependency constraint for {asset.name}") from exc
+
+    def solve(
+        selected: dict[str, ResolvedAsset],
+        constraints: dict[str, tuple[str, ...]],
+    ) -> dict[str, ResolvedAsset] | None:
+        pending = [name for name in constraints if name not in selected]
+        if not pending:
+            return selected
+
+        candidate_sets: dict[str, list[ResolvedAsset]] = {}
+        for name in pending:
+            candidates = _pack_candidates(index, abi, name, rendered(constraints[name]))
+            if not candidates:
+                failures.append(
+                    f"no verified {abi} pack satisfies {name}{rendered(constraints[name])}"
+                )
+                return None
+            candidate_sets[name] = candidates
+        name = min(pending, key=lambda item: (len(candidate_sets[item]), item.casefold()))
+
+        for asset in candidate_sets[name]:
+            asset_conflicts = set(asset.metadata.get("conflicts", []))
+            incompatible = any(
+                other_name in asset_conflicts
+                or name in set(other.metadata.get("conflicts", []))
+                for other_name, other in selected.items()
+            )
+            if incompatible:
+                continue
+            next_selected = dict(selected)
+            next_selected[name] = asset
+            next_constraints = dict(constraints)
+            dependencies = asset.metadata.get("dependencies", [])
+            dependency_constraints = asset.metadata.get("dependency_constraints", {})
+            if not isinstance(dependencies, list) or not isinstance(dependency_constraints, dict):
+                raise LockError(f"pack {name} has invalid dependency metadata")
+            valid = True
+            for dependency in dependencies:
+                if not isinstance(dependency, str) or not dependency:
+                    raise LockError(f"pack {name} has an invalid dependency name")
+                raw_constraint = dependency_constraints.get(dependency, "")
+                if not isinstance(raw_constraint, str):
+                    raise LockError(f"pack {name} has an invalid constraint for {dependency}")
+                values = list(next_constraints.get(dependency, ()))
+                if raw_constraint and raw_constraint not in values:
+                    values.append(raw_constraint)
+                next_constraints[dependency] = tuple(values)
+                assigned = next_selected.get(dependency)
+                if assigned is not None and not version_satisfies(assigned, next_constraints[dependency]):
+                    valid = False
+                    break
+            if not valid:
+                continue
+            result = solve(next_selected, next_constraints)
+            if result is not None:
+                return result
+        return None
+
+    result = solve({}, initial_constraints)
+    if result is None:
+        if failures:
+            raise LockError(failures[-1])
+        raise LockError("could not resolve a mutually compatible StaticPython pack set")
+    return result
 
 
 def resolve_assets(
@@ -174,7 +314,7 @@ def resolve_assets(
     requested: dict[str, str] = dict(config.packages)
     unresolved: set[str] = set()
     for import_name in report.external_imports:
-        if _is_stdlib(import_name):
+        if _is_stdlib(import_name, runtime.metadata):
             continue
         providers = top_level.get(import_name, set())
         if not providers:
@@ -198,34 +338,17 @@ def resolve_assets(
             + "; pure-Python dependencies must be explicitly listed in include-packages"
         )
 
-    selected: dict[str, ResolvedAsset] = {}
-    pending = list(requested)
-    while pending:
-        name = pending.pop(0)
-        if name in selected:
-            continue
-        candidates = _pack_candidates(index, abi, name, requested.get(name, ""))
-        if not candidates:
-            raise LockError(f"no verified {abi} pack satisfies {name}{requested.get(name, '')}")
-        asset = candidates[0]
-        selected[name] = asset
-        for dependency in asset.metadata.get("dependencies", []):
-            if not isinstance(dependency, str) or not dependency:
-                continue
-            constraints = asset.metadata.get("dependency_constraints", {})
-            dependency_constraint = constraints.get(dependency, "") if isinstance(constraints, dict) else ""
-            existing = requested.get(dependency)
-            if existing and dependency_constraint and existing != dependency_constraint:
-                requested[dependency] = f"{existing},{dependency_constraint}"
-            else:
-                requested.setdefault(dependency, dependency_constraint)
-            pending.append(dependency)
+    selected = _solve_pack_dependencies(index, abi, requested)
 
     selected_names = set(selected)
     for asset in selected.values():
         conflicts = selected_names.intersection(asset.metadata.get("conflicts", []))
         if conflicts:
             raise LockError(f"pack {asset.name} conflicts with {', '.join(sorted(conflicts))}")
+    validate_pack_composition(
+        runtime.metadata,
+        [(asset.name, asset.metadata) for asset in selected.values()],
+    )
 
     report.selected_packs = {
         import_name: next(
@@ -235,7 +358,11 @@ def resolve_assets(
         for import_name in report.external_imports
         if top_level.get(import_name)
     }
-    unsupported = set(report.unsupported_native_extensions)
+    unsupported = {
+        name
+        for name in report.unsupported_native_extensions
+        if not _is_stdlib(name, runtime.metadata)
+    }
     unsupported.difference_update(report.selected_packs)
     if unsupported:
         raise LockError(
