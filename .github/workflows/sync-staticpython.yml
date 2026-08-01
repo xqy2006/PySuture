@@ -126,6 +126,11 @@ jobs:
             exit 0
           }
           $branch = "sync/staticpython-${{ needs.candidate.outputs.short_commit }}"
+          $existing = gh pr list --state open --head $branch --json url --jq '.[0].url'
+          if (-not [string]::IsNullOrWhiteSpace($existing)) {
+            Write-Host "An update PR already exists for this verified candidate: $existing"
+            exit 0
+          }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b $branch
