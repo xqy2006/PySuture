@@ -62,6 +62,7 @@ class ResolvedAsset:
             "link_libraries",
             "system_libraries",
             "stdlib_top_level_import_names",
+            "builtin_module_names",
         ):
             if field in self.metadata:
                 record[field] = self.metadata[field]
@@ -239,7 +240,20 @@ def _is_stdlib(name: str, runtime_metadata: dict | None = None) -> bool:
         names = runtime_metadata.get("stdlib_top_level_import_names")
         if not isinstance(names, list) or not all(isinstance(item, str) and item for item in names):
             raise LockError("runtime SDK stdlib_top_level_import_names must be a list of module names")
-        return name in names
+        builtin_names = runtime_metadata.get("builtin_module_names")
+        if builtin_names is not None:
+            if not isinstance(builtin_names, list) or not all(
+                isinstance(item, str) and item for item in builtin_names
+            ):
+                raise LockError("runtime SDK builtin_module_names must be a list of module names")
+            return name in names or name in builtin_names
+        # StaticPython indexes published before builtin_module_names was added
+        # contain frozen modules and registered extension packs, but omit
+        # CPython's intrinsic inittab entries such as sys and builtins. The
+        # build frontend is Windows-only and supports adjacent CPython series,
+        # so its intrinsic builtin inventory is the narrow compatibility
+        # fallback for those already-published indexes.
+        return name in names or name in sys.builtin_module_names
     # Compatibility for indexes produced before StaticPython published the
     # target runtime's exact frozen/builtin module inventory.
     return name in sys.stdlib_module_names or name in WINDOWS_STDLIB_MODULES

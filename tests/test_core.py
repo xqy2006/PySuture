@@ -248,6 +248,26 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertIn("target_only_stdlib", payload["runtime"]["stdlib_top_level_import_names"])
 
+    def test_legacy_runtime_inventory_keeps_intrinsic_builtins(self) -> None:
+        index = self._index()
+        runtime = index["runtimes"]["cp313"]["metadata"]
+        runtime["stdlib_top_level_import_names"] = ["target_only_stdlib"]
+        self._write_project("import sys\n", index=index)
+        config = load_project_config(self.root)
+        resolution = resolve_assets(config, analyze_project(config))
+        self.assertEqual(resolution.packs, ())
+
+    def test_runtime_builtin_inventory_is_preserved_in_lock(self) -> None:
+        index = self._index()
+        runtime = index["runtimes"]["cp313"]["metadata"]
+        runtime["stdlib_top_level_import_names"] = ["target_only_stdlib"]
+        runtime["builtin_module_names"] = ["sys", "builtins"]
+        self._write_project("import sys\n", index=index)
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+        self.assertEqual(payload["runtime"]["builtin_module_names"], ["sys", "builtins"])
+
     def test_target_runtime_builtin_is_not_an_unsupported_host_extension(self) -> None:
         self._write_project("import _ssl\n")
         config = load_project_config(self.root)
