@@ -87,10 +87,12 @@ Build-time overrides include `--python`, `--mode`, `--output`, repeated
 `pysuture.lock` pins the CPython patch version, StaticPython commit, runtime ABI,
 every SDK and pack URL/SHA-256, package version, Cython version, and exact MSVC
 toolchain. Pack dependencies, conflicts, licenses, validation status, CPython
-source commit, and toolchain fingerprint are rechecked both while locking and
-after extracting the cached build assets. Descriptor symbols, source lists,
-libraries, and other build metadata must exactly match the metadata inside the
-hash-verified asset; the lock file cannot override archive contents.
+source commit, and link-compatible toolchain fields are rechecked both while
+locking and after extracting the cached build assets. The recorded
+`vscmd_version` remains provenance rather than an object/link ABI gate.
+Descriptor symbols, source lists, libraries, and other build metadata must
+exactly match the metadata inside the hash-verified asset; the lock file cannot
+override archive contents.
 
 The generated PEP 587 launcher is isolated from environment and user-site
 injection, preserves Unicode application arguments, and does not expose CPython

@@ -47,6 +47,9 @@ LOCKED_METADATA_OPTIONAL_FIELDS = (
     "builtin_module_names",
 )
 
+# VsDevCmd's own version can change independently of the compiler and linker.
+# Keep it in asset provenance, but gate composition on the fields that affect
+# whether the static objects can be linked together.
 TOOLCHAIN_LINK_COMPATIBILITY_FIELDS = (
     "visual_studio_version",
     "vc_tools_version",
