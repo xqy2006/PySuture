@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import sys
 from dataclasses import dataclass
@@ -51,11 +52,11 @@ def _locked_metadata_projection(metadata: dict) -> dict:
     if not isinstance(metadata, dict):
         raise LockError("verified asset metadata must be an object")
     projection = {
-        field: metadata.get(field, default)
+        field: deepcopy(metadata.get(field, default))
         for field, default in LOCKED_METADATA_DEFAULTS.items()
     }
     projection.update(
-        (field, metadata[field])
+        (field, deepcopy(metadata[field]))
         for field in LOCKED_METADATA_OPTIONAL_FIELDS
         if field in metadata
     )

@@ -44,6 +44,7 @@ from pysuture.lockfile import (
     write_lock,
 )
 from pysuture.resolver import (
+    ResolvedAsset,
     _solve_pack_dependencies,
     build_lock_payload,
     load_verified_index,
@@ -331,6 +332,37 @@ class CoreTests(unittest.TestCase):
             self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"),
         ):
             materialize_assets(tampered_payload, offline=True)
+
+    def test_lock_metadata_projection_is_an_independent_snapshot(self) -> None:
+        first_metadata = {"sources": ["src/pack.c"], "license": {"status": "complete"}}
+        first = ResolvedAsset(
+            "first",
+            "1.0",
+            "first.zip",
+            "https://example.invalid/first.zip",
+            "1" * 64,
+            1,
+            first_metadata,
+        ).lock_record()
+        second = ResolvedAsset(
+            "second",
+            "1.0",
+            "second.zip",
+            "https://example.invalid/second.zip",
+            "2" * 64,
+            1,
+            {},
+        ).lock_record()
+
+        first_metadata["sources"].append("src/late.c")
+        first_metadata["license"]["status"] = "changed"
+        first["dependencies"].append("injected")
+        first["verification"]["status"] = "forged"
+
+        self.assertEqual(first["sources"], ["src/pack.c"])
+        self.assertEqual(first["license"], {"status": "complete"})
+        self.assertEqual(second["dependencies"], [])
+        self.assertEqual(second["verification"], {})
 
     def test_reviewed_catalog_resolves_exact_hashed_index(self) -> None:
         self._write_project("import attrs\n")
