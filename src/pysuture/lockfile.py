@@ -100,8 +100,12 @@ def validate_lock_for_configuration(lock: dict, config: ProjectConfig) -> None:
             "run 'pysuture lock --update'"
         )
 
+    pack_records = lock.get("packs")
+    if not isinstance(pack_records, list):
+        raise LockError("pysuture.lock packs must be an array")
+
     locked_packs: dict[str, tuple[str, str]] = {}
-    for record in lock.get("packs", []):
+    for record in pack_records:
         if not isinstance(record, dict):
             raise LockError("pysuture.lock contains an invalid pack record")
         name = record.get("name")

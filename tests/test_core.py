@@ -534,6 +534,10 @@ class CoreTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(LockError, "duplicate pack records"):
             validate_lock_for_configuration(duplicate, config)
+        malformed = dict(payload)
+        malformed["packs"] = None
+        with self.assertRaisesRegex(LockError, "packs must be an array"):
+            validate_lock_for_configuration(malformed, config)
 
         write_lock(self.root, payload)
         stderr = io.StringIO()
