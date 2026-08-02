@@ -35,6 +35,8 @@ class WorkflowContractTests(unittest.TestCase):
         )
         self.assertIn('@("--self-test", "参数 空格", "路径-中文")', workflow)
         self.assertIn("$windowInfo.ArgumentList.Add($_)", workflow)
+        self.assertEqual(workflow.count("Set-Location $work"), 2)
+        self.assertIn("$windowInfo.WorkingDirectory = $work", workflow)
         self.assertNotIn('$exe -ArgumentList @("--quiet")', workflow)
 
 
