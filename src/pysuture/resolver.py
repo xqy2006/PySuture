@@ -47,6 +47,14 @@ LOCKED_METADATA_OPTIONAL_FIELDS = (
     "builtin_module_names",
 )
 
+TOOLCHAIN_LINK_COMPATIBILITY_FIELDS = (
+    "visual_studio_version",
+    "vc_tools_version",
+    "windows_sdk_version",
+    "platform_toolset",
+    "runtime_library",
+)
+
 
 def _locked_metadata_projection(metadata: dict) -> dict:
     if not isinstance(metadata, dict):
@@ -77,6 +85,38 @@ def validate_locked_asset_metadata(record: dict, metadata: dict, *, owner: str) 
     if mismatched:
         raise LockError(
             f"pysuture.lock {owner} metadata differs from the verified asset: "
+            + ", ".join(mismatched)
+        )
+
+
+def _toolchain_link_identity(toolchain: object, *, owner: str) -> dict[str, str]:
+    if not isinstance(toolchain, dict):
+        raise LockError(f"{owner} toolchain metadata must be an object")
+    identity = {}
+    for field in TOOLCHAIN_LINK_COMPATIBILITY_FIELDS:
+        value = toolchain.get(field)
+        if value is not None and not isinstance(value, str):
+            raise LockError(f"{owner} toolchain field {field} must be a string")
+        identity[field] = (value or "").strip().rstrip("\\/").casefold()
+    return identity
+
+
+def _validate_pack_toolchain_compatibility(
+    runtime_toolchain: object,
+    pack_toolchain: object,
+    *,
+    owner: str,
+) -> None:
+    runtime_identity = _toolchain_link_identity(runtime_toolchain, owner="runtime SDK")
+    pack_identity = _toolchain_link_identity(pack_toolchain, owner=f"pack {owner}")
+    mismatched = [
+        field
+        for field in TOOLCHAIN_LINK_COMPATIBILITY_FIELDS
+        if pack_identity[field] != runtime_identity[field]
+    ]
+    if mismatched:
+        raise LockError(
+            f"pack {owner} toolchain does not match the runtime SDK: "
             + ", ".join(mismatched)
         )
 
@@ -376,10 +416,14 @@ def validate_pack_runtime_compatibility(
             "cpython_version",
             "cpython_commit",
             "cpython_tag",
-            "toolchain",
         ):
             if metadata.get(field) != runtime_metadata.get(field):
                 raise LockError(f"pack {owner} {field} does not match the runtime SDK")
+        _validate_pack_toolchain_compatibility(
+            runtime_metadata.get("toolchain"),
+            metadata.get("toolchain"),
+            owner=owner,
+        )
 
     for owner, metadata in packs:
         dependencies = metadata.get("dependencies", [])

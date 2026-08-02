@@ -519,6 +519,37 @@ class CoreTests(unittest.TestCase):
                 staticpython_commit=index["staticpython_commit"],
             )
 
+    def test_pack_runtime_contract_uses_link_compatible_toolchain_fields(self) -> None:
+        index = self._index()
+        runtime = index["runtimes"]["cp313"]["metadata"]
+        pack = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
+        runtime["toolchain"] = {
+            "visual_studio_version": "17.0",
+            "vscmd_version": "17.14.36",
+            "vc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0\\",
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+        }
+        pack["toolchain"] = {
+            **runtime["toolchain"],
+            "vscmd_version": "17.14.37",
+            "windows_sdk_version": "10.0.26100.0",
+        }
+        validate_pack_runtime_compatibility(
+            runtime,
+            [("attrs", pack)],
+            staticpython_commit=index["staticpython_commit"],
+        )
+
+        pack["toolchain"]["vc_tools_version"] = "14.43.34808"
+        with self.assertRaisesRegex(LockError, "toolchain does not match.*vc_tools_version"):
+            validate_pack_runtime_compatibility(
+                runtime,
+                [("attrs", pack)],
+                staticpython_commit=index["staticpython_commit"],
+            )
+
     def test_dependency_solver_backtracks_across_combined_constraints(self) -> None:
         index = self._index()
 
