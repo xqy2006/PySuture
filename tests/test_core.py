@@ -22,7 +22,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from pysuture.analyzer import _private_package_modules, analyze_project
-from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES, materialize_assets
+from pysuture.builder import (
+    REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _resolve_system_libraries,
+    materialize_assets,
+)
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
@@ -80,6 +84,15 @@ class CoreTests(unittest.TestCase):
 
     def test_windows_link_baseline_includes_security_apis(self) -> None:
         self.assertIn("advapi32.lib", REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
+
+    def test_pack_system_library_suppression_is_case_insensitive(self) -> None:
+        self.assertEqual(
+            _resolve_system_libraries(
+                ["gdiplus.lib", "user32.lib", "USER32.LIB", "advapi32.lib"],
+                ["GdiPlus.lib"],
+            ),
+            ["user32.lib", "advapi32.lib"],
+        )
 
     def test_latest_prerelease_asset_uses_publication_time_not_api_order(self) -> None:
         releases = [
@@ -184,6 +197,7 @@ class CoreTests(unittest.TestCase):
             "dependencies": [],
             "dependency_constraints": {},
             "conflicts": [],
+            "suppressed_system_libraries": ["gdiplus.lib"],
             "descriptor_symbol": "StaticPython_Pack_attrs",
             "libraries": [],
             "sources": ["src/pack.c"],
@@ -302,6 +316,7 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
+        self.assertEqual(payload["packs"][0]["suppressed_system_libraries"], ["gdiplus.lib"])
 
     def test_locked_build_metadata_must_match_verified_assets(self) -> None:
         self._write_project("import attrs\n")
