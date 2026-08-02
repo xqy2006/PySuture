@@ -896,6 +896,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual([record.target for record in records], ["embedded/payload.txt"])
 
+    def test_resource_collection_translates_a_late_read_failure(self) -> None:
+        self._write_project("pass\n")
+        payload = self.root / "payload.bin"
+        payload.write_bytes(b"payload")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("payload.bin", "assets/payload.bin"),),
+        )
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=OSError("gone")):
+            with self.assertRaisesRegex(BuildError, "could not read matched resource"):
+                collect_application_resources(config)
+
     def test_resource_embedding_rejects_source_drift(self) -> None:
         source = self.root / "payload.bin"
         source.write_bytes(b"original")
@@ -910,6 +923,32 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "changed after collection"):
             write_resource_sources([record], generated_dir)
         self.assertFalse((generated_dir / "resource_000001.c").exists())
+
+    def test_resource_embedding_preflights_all_inputs_before_emitting_sources(self) -> None:
+        first = self.root / "first.bin"
+        second = self.root / "second.bin"
+        first.write_bytes(b"first")
+        second.write_bytes(b"changed")
+        records = [
+            ResourceRecord(
+                source=first,
+                target="assets/first.bin",
+                sha256=sha256_bytes(b"first"),
+                size=5,
+            ),
+            ResourceRecord(
+                source=second,
+                target="assets/second.bin",
+                sha256=sha256_bytes(b"original"),
+                size=8,
+            ),
+        ]
+        generated_dir = self.root / "generated"
+
+        with self.assertRaisesRegex(BuildError, "changed after collection"):
+            write_resource_sources(records, generated_dir)
+
+        self.assertFalse(generated_dir.exists())
 
     def test_resource_embedding_rejects_cross_origin_target_collisions(self) -> None:
         first = self.root / "application-license.txt"
@@ -943,6 +982,7 @@ class CoreTests(unittest.TestCase):
             "C:drive-relative.bin",
             "assets/./payload.bin",
             "assets/bad\x00.bin",
+            "assets/bad\ud800.bin",
         ):
             with self.subTest(target=target):
                 record = ResourceRecord(
