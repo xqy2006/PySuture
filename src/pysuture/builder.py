@@ -18,7 +18,11 @@ from .errors import BuildError, LockError
 from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
-from .resolver import validate_pack_composition, validate_pack_runtime_compatibility
+from .resolver import (
+    validate_locked_asset_metadata,
+    validate_pack_composition,
+    validate_pack_runtime_compatibility,
+)
 from .toolchain import MSVCToolchain, discover_msvc, validate_locked_toolchain
 
 
@@ -60,6 +64,11 @@ def materialize_assets(lock: dict, *, offline: bool) -> MaterializedAssets:
     runtime_archive = fetch_asset(runtime_record["url"], runtime_record["sha256"], offline=offline)
     runtime_root = extract_asset(runtime_archive, runtime_record["sha256"])
     runtime_metadata = _read_json(runtime_root / RUNTIME_METADATA_PATH)
+    validate_locked_asset_metadata(runtime_record, runtime_metadata, owner="runtime SDK")
+    if runtime_record.get("name") != "runtime-sdk":
+        raise BuildError("pysuture.lock runtime asset name must be 'runtime-sdk'")
+    if runtime_record.get("version") != lock.get("cpython_version"):
+        raise BuildError("pysuture.lock runtime asset version does not match CPython")
     for field in ("cpython_version", "cpython_abi", "runtime_abi"):
         if runtime_metadata.get(field) != lock.get(field):
             raise BuildError(
@@ -77,6 +86,7 @@ def materialize_assets(lock: dict, *, offline: bool) -> MaterializedAssets:
         metadata = _read_json(root / "pack.json")
         if metadata.get("name") != record["name"] or metadata.get("version") != record["version"]:
             raise BuildError(f"pack identity mismatch in {archive}")
+        validate_locked_asset_metadata(record, metadata, owner=f"pack {record['name']}")
         if metadata.get("runtime_abi") != lock["runtime_abi"]:
             raise BuildError(f"pack {record['name']} runtime ABI does not match the lock")
         if metadata.get("staticpython_commit") != lock["staticpython_commit"]:
@@ -320,11 +330,11 @@ def build_executable(
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
     for locked_record, pack_root, metadata in assets.packs:
-        symbol = locked_record.get("descriptor_symbol") or metadata.get("descriptor_symbol")
+        symbol = metadata.get("descriptor_symbol")
         if not isinstance(symbol, str) or not symbol:
             raise BuildError(f"pack {locked_record['name']} has no descriptor symbol")
         pack_symbols.append(symbol)
-        for relative in locked_record.get("sources", metadata.get("sources", [])):
+        for relative in metadata.get("sources", []):
             pack_sources.append(_safe_member(pack_root, relative))
         library_by_name = {}
         for library_name in metadata.get("libraries", []):

@@ -22,7 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from pysuture.analyzer import _private_package_modules, analyze_project
-from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
+from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES, materialize_assets
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
@@ -48,6 +48,7 @@ from pysuture.resolver import (
     build_lock_payload,
     load_verified_index,
     resolve_assets,
+    validate_locked_asset_metadata,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
 )
@@ -274,6 +275,62 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
+
+    def test_locked_build_metadata_must_match_verified_assets(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        resolution = resolve_assets(config, report)
+        payload = build_lock_payload(config, report, resolution)
+
+        runtime_record = payload["runtime"]
+        validate_locked_asset_metadata(
+            runtime_record,
+            resolution.runtime.metadata,
+            owner="runtime SDK",
+        )
+        pack_record = payload["packs"][0]
+        pack_metadata = resolution.packs[0].metadata
+        validate_locked_asset_metadata(pack_record, pack_metadata, owner="pack attrs")
+
+        tampered_sources = {**pack_record, "sources": ["src/alternate.c"]}
+        with self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"):
+            validate_locked_asset_metadata(tampered_sources, pack_metadata, owner="pack attrs")
+
+        injected_optional_field = {**pack_record, "link_libraries": ["unlocked.lib"]}
+        with self.assertRaisesRegex(LockError, "pack attrs metadata differs.*link_libraries"):
+            validate_locked_asset_metadata(
+                injected_optional_field,
+                pack_metadata,
+                owner="pack attrs",
+            )
+
+        runtime_root = self.root / "runtime"
+        (runtime_root / "metadata").mkdir(parents=True)
+        (runtime_root / "metadata" / "runtime-sdk.v1.json").write_text(
+            json.dumps(resolution.runtime.metadata),
+            encoding="utf-8",
+        )
+        pack_root = self.root / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.json").write_text(
+            json.dumps(pack_metadata),
+            encoding="utf-8",
+        )
+        tampered_payload = json.loads(json.dumps(payload))
+        tampered_payload["packs"][0]["sources"] = ["src/alternate.c"]
+        with (
+            mock.patch(
+                "pysuture.builder.fetch_asset",
+                side_effect=[self.root / "runtime.zip", self.root / "attrs.zip"],
+            ),
+            mock.patch(
+                "pysuture.builder.extract_asset",
+                side_effect=[runtime_root, pack_root],
+            ),
+            self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"),
+        ):
+            materialize_assets(tampered_payload, offline=True)
 
     def test_reviewed_catalog_resolves_exact_hashed_index(self) -> None:
         self._write_project("import attrs\n")

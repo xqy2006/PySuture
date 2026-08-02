@@ -20,6 +20,65 @@ WINDOWS_STDLIB_MODULES = {
     "winsound",
 }
 
+LOCKED_METADATA_DEFAULTS = {
+    "descriptor_symbol": None,
+    "libraries": [],
+    "wholearchive": [],
+    "system_libraries": [],
+    "sources": [],
+    "license": {},
+    "top_level_import_names": [],
+    "dependencies": [],
+    "dependency_constraints": {},
+    "conflicts": [],
+    "verification": {},
+}
+LOCKED_METADATA_OPTIONAL_FIELDS = (
+    "runtime_abi",
+    "cpython_abi",
+    "core_library",
+    "runtime_library",
+    "base_pack_symbol",
+    "include_directory",
+    "library_directory",
+    "link_libraries",
+    "stdlib_top_level_import_names",
+    "builtin_module_names",
+)
+
+
+def _locked_metadata_projection(metadata: dict) -> dict:
+    if not isinstance(metadata, dict):
+        raise LockError("verified asset metadata must be an object")
+    projection = {
+        field: metadata.get(field, default)
+        for field, default in LOCKED_METADATA_DEFAULTS.items()
+    }
+    projection.update(
+        (field, metadata[field])
+        for field in LOCKED_METADATA_OPTIONAL_FIELDS
+        if field in metadata
+    )
+    return projection
+
+
+def validate_locked_asset_metadata(record: dict, metadata: dict, *, owner: str) -> None:
+    """Require the lock's build-relevant fields to match the verified archive."""
+    if not isinstance(record, dict):
+        raise LockError(f"pysuture.lock {owner} record must be an object")
+    expected = _locked_metadata_projection(metadata)
+    missing = object()
+    mismatched = [
+        field
+        for field in (*LOCKED_METADATA_DEFAULTS, *LOCKED_METADATA_OPTIONAL_FIELDS)
+        if record.get(field, missing) != expected.get(field, missing)
+    ]
+    if mismatched:
+        raise LockError(
+            f"pysuture.lock {owner} metadata differs from the verified asset: "
+            + ", ".join(mismatched)
+        )
+
 
 @dataclass(frozen=True)
 class ResolvedAsset:
@@ -39,33 +98,8 @@ class ResolvedAsset:
             "url": self.url,
             "sha256": self.sha256,
             "size": self.size,
-            "descriptor_symbol": self.metadata.get("descriptor_symbol"),
-            "libraries": self.metadata.get("libraries", []),
-            "wholearchive": self.metadata.get("wholearchive", []),
-            "system_libraries": self.metadata.get("system_libraries", []),
-            "sources": self.metadata.get("sources", []),
-            "license": self.metadata.get("license", {}),
-            "top_level_import_names": self.metadata.get("top_level_import_names", []),
-            "dependencies": self.metadata.get("dependencies", []),
-            "dependency_constraints": self.metadata.get("dependency_constraints", {}),
-            "conflicts": self.metadata.get("conflicts", []),
-            "verification": self.metadata.get("verification", {}),
         }
-        for field in (
-            "runtime_abi",
-            "cpython_abi",
-            "core_library",
-            "runtime_library",
-            "base_pack_symbol",
-            "include_directory",
-            "library_directory",
-            "link_libraries",
-            "system_libraries",
-            "stdlib_top_level_import_names",
-            "builtin_module_names",
-        ):
-            if field in self.metadata:
-                record[field] = self.metadata[field]
+        record.update(_locked_metadata_projection(self.metadata))
         return record
 
 
