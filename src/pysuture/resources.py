@@ -32,11 +32,17 @@ def _wildcard_anchor(pattern: str) -> Path:
 
 
 def _safe_target(value: str) -> str:
-    normalized = value.replace("\\", "/").strip("/")
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
     path = PurePosixPath(normalized)
-    if not normalized or path.is_absolute() or ".." in path.parts:
+    if (
+        not normalized
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
         raise BuildError(f"resource target must be a safe relative virtual path: {value!r}")
-    return path.as_posix()
+    return "/".join(parts)
 
 
 def _looks_secret(path: Path) -> bool:
