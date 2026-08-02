@@ -6,6 +6,15 @@ import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import attrs
+import regex
+
+
+@attrs.define(frozen=True)
+class SmokeRecord:
+    message: str
+    ok: bool
+
 
 def square(value: int) -> int:
     return value * value
@@ -37,6 +46,12 @@ def self_test() -> int:
     payload = json.loads(Path("assets/payload.json").read_text(encoding="utf-8"))
     if payload != {"message": "静态资源", "ok": True}:
         return 10
+    record = SmokeRecord(**payload)
+    if attrs.asdict(record) != payload:
+        return 16
+    match = regex.fullmatch(r"\p{Letter}+", "路径中文")
+    if match is None or match.group(0) != "路径中文":
+        return 17
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))
