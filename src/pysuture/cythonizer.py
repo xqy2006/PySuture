@@ -567,6 +567,7 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
     generated_dir = build_dir / "generated"
     warnings: list[str] = []
     units: list[CythonUnit] = []
+    assigned_init_symbols: dict[str, str] = {}
     for name in report.reachable_modules:
         record = report.modules[name]
         digest = hashlib.sha256((name + "\0" + record.source_sha256).encode("utf-8")).hexdigest()[:20]
@@ -604,7 +605,7 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
         if result.returncode != 0 or not generated.is_file():
             raise BuildError(f"Cython failed for {name}:\n{result.stdout[-8000:]}")
         generated_text = generated.read_text(encoding="utf-8", errors="replace")
-        package_aliases = set(PACKAGE_ALIAS_INIT_RE.findall(generated_text))
+        package_aliases = tuple(sorted(set(PACKAGE_ALIAS_INIT_RE.findall(generated_text))))
         init_matches = [
             symbol
             for symbol in dict.fromkeys(INIT_SYMBOL_RE.findall(generated_text))
@@ -618,6 +619,21 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
         unique_init = f"PyInit_pysuture_{digest}"
         unique_main = f"pysuture_module_is_main_{digest}" if original_main else None
         definitions = ["CYTHON_NO_PYINIT_EXPORT=1", f"{original_init}={unique_init}"]
+        alias_definitions: list[str] = []
+        for index, alias in enumerate(package_aliases):
+            unique_alias = f"PyInit_pysuture_alias_{digest}_{index}"
+            alias_definitions.append(f"{alias}={unique_alias}")
+            previous = assigned_init_symbols.setdefault(unique_alias, f"{name}:{alias}")
+            if previous != f"{name}:{alias}":
+                raise BuildError(
+                    f"Cython init alias collision between {previous} and {name}:{alias}: {unique_alias}"
+                )
+        definitions.extend(alias_definitions)
+        previous = assigned_init_symbols.setdefault(unique_init, name)
+        if previous != name:
+            raise BuildError(
+                f"Cython init symbol collision between {previous} and {name}: {unique_init}"
+            )
         if original_main and unique_main:
             definitions.append(f"{original_main}={unique_main}")
         units.append(
