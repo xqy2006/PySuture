@@ -131,8 +131,14 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
-          if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          Push-Location $work
+          try {
+            & ".\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
+            if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "runtime created or extracted files" }
       - name: Windowed startup smoke
@@ -149,7 +155,12 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          $process = Start-Process $exe -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
+          $process = Start-Process $exe `
+            -ArgumentList @("--quiet") `
+            -WorkingDirectory $work `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
@@ -248,8 +259,14 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          & $exe "参数 空格" "路径-中文"
-          if ($LASTEXITCODE -ne 0) { throw "wxPython plus pyfltk executable failed with $LASTEXITCODE" }
+          Push-Location $work
+          try {
+            & $exe "参数 空格" "路径-中文"
+            if ($LASTEXITCODE -ne 0) { throw "wxPython plus pyfltk executable failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "wxPython plus pyfltk runtime created or extracted files" }
 
