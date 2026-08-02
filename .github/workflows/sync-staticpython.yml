@@ -121,10 +121,19 @@ jobs:
             [pscustomobject]@{ Args = @("-c", "print('must not run')", "-m", "not.a.module", "argument with spaces") },
             [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle") },
             [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-I", "-B", "-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-B", "-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "print('application argument')") },
             [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") },
             [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(-1)") },
             [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(+1)") },
-            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") }
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(-1)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(+1)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.forkserver import main; main(3, 4, [], **{})") }
           )
           foreach ($probeCase in $probeCases) {
             $probeArgs = [object[]]$probeCase.Args
@@ -136,6 +145,30 @@ jobs:
             if ($actual -ne $expected) {
               throw "argv was not preserved: expected $expected, got $actual"
             }
+          }
+          $trackerInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $trackerInfo.FileName = "$work\smoke-${{ matrix.python }}-console.exe"
+          $trackerInfo.UseShellExecute = $false
+          $trackerInfo.RedirectStandardInput = $true
+          $trackerInfo.RedirectStandardOutput = $true
+          $trackerInfo.RedirectStandardError = $true
+          @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(0)") |
+            ForEach-Object { [void]$trackerInfo.ArgumentList.Add($_) }
+          $trackerProcess = [System.Diagnostics.Process]::new()
+          $trackerProcess.StartInfo = $trackerInfo
+          if (-not $trackerProcess.Start()) { throw "resource tracker probe did not start" }
+          $trackerProcess.StandardInput.Close()
+          if (-not $trackerProcess.WaitForExit(30000)) {
+            $trackerProcess.Kill($true)
+            throw "resource tracker probe timed out"
+          }
+          $trackerOutput = $trackerProcess.StandardOutput.ReadToEnd()
+          $trackerError = $trackerProcess.StandardError.ReadToEnd()
+          if ($trackerProcess.ExitCode -ne 0) {
+            throw "resource tracker probe failed with $($trackerProcess.ExitCode): $trackerError"
+          }
+          if ($trackerOutput.Trim()) {
+            throw "exact resource tracker signature reached the application: $trackerOutput"
           }
           Remove-Item Env:PYSUTURE_SMOKE_ARGV_PROBE
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
