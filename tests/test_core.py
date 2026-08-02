@@ -881,6 +881,32 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "credential"):
             collect_application_resources(config)
 
+    def test_secret_symlink_name_is_checked_before_resolution(self) -> None:
+        self._write_project("pass\n")
+        matched = self.root / ".env"
+        matched.write_text("placeholder\n", encoding="utf-8")
+        target = self.root / "public-config.txt"
+        target.write_text("ordinary data\n", encoding="utf-8")
+        resolved_target = target.resolve()
+        original_resolve = Path.resolve
+
+        def resolve_symlink_name(path: Path, *args: object, **kwargs: object) -> Path:
+            if path == matched:
+                return resolved_target
+            return original_resolve(path, *args, **kwargs)
+
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env", "config/settings.txt"),),
+        )
+        # Simulate symlink resolution without requiring Windows symlink
+        # privileges on the test runner.
+        with mock.patch.object(
+            Path, "resolve", autospec=True, side_effect=resolve_symlink_name
+        ):
+            with self.assertRaisesRegex(BuildError, r"credential.*\.env"):
+                collect_application_resources(config)
+
     def test_wildcard_resource_accepts_windows_target_separator(self) -> None:
         self._write_project("pass\n")
         assets = self.root / "assets"
@@ -1006,6 +1032,99 @@ class CoreTests(unittest.TestCase):
         source.unlink()
         with self.assertRaisesRegex(BuildError, "could not reread collected resource"):
             write_resource_sources([record], self.root / "generated")
+
+    def test_secret_resource_variants_and_private_key_content_are_rejected(self) -> None:
+        self._write_project("pass\n")
+        cases = {
+            ".env.production": "TOKEN=secret\n",
+            ".envrc": "export TOKEN=secret\n",
+            ".netrc": "machine example.invalid password secret\n",
+            "client_secret-production.json": '{"client_secret": "secret"}\n',
+            "id_ed25519.backup": "private material\n",
+            "secrets.toml": 'token = "secret"\n',
+            "renamed-config.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+            "late-key.txt": "x" * (128 * 1024) + "-----BEGIN PRIVATE KEY-----\nsecret\n",
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                (self.root / name).write_text(payload, encoding="utf-8")
+                config = replace(
+                    load_project_config(self.root),
+                    data=(DataMapping(name, f"config/{name}"),),
+                )
+                with self.assertRaisesRegex(BuildError, "credential"):
+                    collect_application_resources(config)
+
+    def test_public_keys_and_certificates_are_not_treated_as_private(self) -> None:
+        self._write_project("pass\n")
+        (self.root / "id_ed25519.pub").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        (self.root / "id_ed25519.pub.backup").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        (self.root / "certificate.pem").write_text(
+            "-----BEGIN CERTIFICATE-----\npublic certificate\n-----END CERTIFICATE-----\n",
+            encoding="utf-8",
+        )
+        config = replace(
+            load_project_config(self.root),
+            data=(
+                DataMapping("id_ed25519.pub", "keys/id_ed25519.pub"),
+                DataMapping("id_ed25519.pub.backup", "keys/id_ed25519.pub.backup"),
+                DataMapping("certificate.pem", "certificates/certificate.pem"),
+            ),
+        )
+
+        records, warnings = collect_application_resources(config)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [record.target for record in records],
+            [
+                "certificates/certificate.pem",
+                "keys/id_ed25519.pub",
+                "keys/id_ed25519.pub.backup",
+            ],
+        )
+
+    def test_secret_resource_policy_can_warn_or_allow(self) -> None:
+        self._write_project("pass\n")
+        (self.root / ".env.local").write_text("TOKEN=secret\n", encoding="utf-8")
+        base = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env.local", "config/.env.local"),),
+        )
+        records, warnings = collect_application_resources(
+            replace(base, secret_policy="warn")
+        )
+        self.assertEqual([record.target for record in records], ["config/.env.local"])
+        self.assertEqual(len(warnings), 1)
+        _records, allowed_warnings = collect_application_resources(
+            replace(base, secret_policy="allow")
+        )
+        self.assertEqual(allowed_warnings, [])
+
+    def test_application_resource_read_failure_is_reported_as_build_error(self) -> None:
+        self._write_project("pass\n")
+        source = self.root / "payload.txt"
+        source.write_text("payload\n", encoding="utf-8")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("payload.txt", "assets/payload.txt"),),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def fail_target(path: Path) -> bytes:
+            if path.resolve() == source.resolve():
+                raise OSError("injected read failure")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=fail_target):
+            with self.assertRaisesRegex(BuildError, "could not read matched resource"):
+                collect_application_resources(config)
 
     def test_zip_extraction_rejects_parent_traversal(self) -> None:
         archive_path = self.root / "unsafe.zip"

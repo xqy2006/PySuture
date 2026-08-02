@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -9,6 +10,28 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from .config import ProjectConfig
 from .constants import SECRET_BASENAMES, SECRET_SUFFIXES
 from .errors import BuildError
+
+
+SECRET_NAME_PATTERNS = (
+    re.compile(r"^\.env(?:rc|[._-].+)?$"),
+    re.compile(
+        r"^(?:credentials|secrets?|client[_-]?secret|service[_-]?account)(?:[._-].+)?"
+        r"(?:\.json|\.toml|\.ya?ml)?$"
+    ),
+    re.compile(
+        r"^id_(?:dsa|ecdsa|ed25519|rsa)"
+        r"(?!\.pub(?:$|[._-]))(?:[._-].+)?$"
+    ),
+)
+PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN DSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"PuTTY-User-Key-File-",
+)
 
 
 @dataclass(frozen=True)
@@ -50,9 +73,29 @@ def _safe_target(value: str) -> str:
     return "/".join(parts)
 
 
-def _looks_secret(path: Path) -> bool:
+def _looks_secret_name(path: Path) -> bool:
     name = path.name.casefold()
-    return name in SECRET_BASENAMES or path.suffix.casefold() in SECRET_SUFFIXES
+    return (
+        name in SECRET_BASENAMES
+        or path.suffix.casefold() in SECRET_SUFFIXES
+        or any(pattern.fullmatch(name) for pattern in SECRET_NAME_PATTERNS)
+    )
+
+
+def _looks_secret(
+    path: Path,
+    payload: bytes,
+    *,
+    matched_path: Path | None = None,
+) -> bool:
+    # ``resolve()`` is needed for the project-root containment check, but it
+    # replaces a symlink's security-relevant basename with its target name.
+    # Inspect both names while scanning the payload only once.
+    if _looks_secret_name(path) or (
+        matched_path is not None and _looks_secret_name(matched_path)
+    ):
+        return True
+    return any(marker in payload for marker in PRIVATE_KEY_MARKERS)
 
 
 def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceRecord], list[str]]:
@@ -72,8 +115,12 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
             resolved = path.resolve()
             if root != resolved and root not in resolved.parents:
                 raise BuildError(f"resource escapes the project root: {path}")
-            if _looks_secret(resolved):
-                message = f"resource looks like a credential or private key: {resolved.relative_to(root)}"
+            try:
+                payload = resolved.read_bytes()
+            except OSError as exc:
+                raise BuildError(f"could not read matched resource: {resolved}") from exc
+            if _looks_secret(resolved, payload, matched_path=path):
+                message = f"resource looks like a credential or private key: {path.relative_to(root)}"
                 if config.secret_policy == "error":
                     raise BuildError(message)
                 if config.secret_policy == "warn":
@@ -92,10 +139,6 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
                 target = _safe_target(target_value)
             if target in records:
                 raise BuildError(f"multiple resources map to virtual path {target!r}")
-            try:
-                payload = resolved.read_bytes()
-            except OSError as exc:
-                raise BuildError(f"could not read matched resource: {resolved}") from exc
             records[target] = ResourceRecord(
                 source=resolved,
                 target=target,
