@@ -1180,26 +1180,60 @@ class CoreTests(unittest.TestCase):
         prepared = ast.unparse(tree)
         reparsed_guard = ast.parse(prepared).body[0]
         self.assertIsInstance(reparsed_guard, ast.If)
-        self.assertIsInstance(reparsed_guard.body[0], ast.ImportFrom)
+        self.assertIsInstance(reparsed_guard.body[0], ast.Import)
+        self.assertIsInstance(reparsed_guard.body[1], ast.ImportFrom)
+        self.assertIsInstance(reparsed_guard.body[2], ast.FunctionDef)
         self.assertTrue(
-            isinstance(reparsed_guard.body[1], ast.Expr)
-            and isinstance(reparsed_guard.body[1].value, ast.Call)
-            and isinstance(reparsed_guard.body[1].value.func, ast.Name)
-            and reparsed_guard.body[1].value.func.id == "freeze_support"
-        )
-        self.assertEqual(
-            sum(
-                1
-                for statement in reparsed_guard.body
-                if isinstance(statement, ast.Expr)
-                and isinstance(statement.value, ast.Call)
-                and isinstance(statement.value.func, ast.Name)
-                and statement.value.func.id == "freeze_support"
-            ),
-            2,
+            isinstance(reparsed_guard.body[3], ast.If)
+            and len(reparsed_guard.body[3].body) == 1
+            and isinstance(reparsed_guard.body[3].body[0], ast.Expr)
+            and isinstance(reparsed_guard.body[3].body[0].value, ast.Call)
+            and isinstance(reparsed_guard.body[3].body[0].value.func, ast.Name)
+            and reparsed_guard.body[3].body[0].value.func.id == "__pysuture_freeze_support"
         )
         self.assertIn("start_children()", prepared)
-        self.assertGreater(prepared.index("start_children()"), prepared.index("freeze_support()"))
+        self.assertGreater(
+            prepared.index("start_children()"),
+            prepared.index("__pysuture_freeze_support()"),
+        )
+
+    def test_injected_freeze_support_only_accepts_exact_windows_child_signature(self) -> None:
+        tree = ast.parse("if __name__ == '__main__':\n    start_children()\n")
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        ast.fix_missing_locations(tree)
+        prepared = compile(tree, "<prepared-entry>", "exec")
+        cases = (
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=2"], True),
+            (["--multiprocessing-fork", "parent_pid=0001", "pipe_handle=0002"], True),
+            (
+                [
+                    "--multiprocessing-fork",
+                    "parent_pid=000000000000000000001",
+                    "pipe_handle=18446744073709551615",
+                ],
+                True,
+            ),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=+1"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=١"], False),
+            (["-c", "print('application argument')"], False),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                start_children = mock.Mock()
+                with (
+                    mock.patch.object(sys, "argv", ["demo.exe", *arguments]),
+                    mock.patch("multiprocessing.freeze_support") as freeze_support,
+                ):
+                    exec(
+                        prepared,
+                        {"__name__": "__main__", "start_children": start_children},
+                    )
+                self.assertEqual(freeze_support.called, expected_call)
+                start_children.assert_called_once_with()
 
     def test_existing_freeze_support_prelude_is_not_duplicated(self) -> None:
         tree = ast.parse(
@@ -1235,12 +1269,26 @@ class CoreTests(unittest.TestCase):
             orelse=[],
         )
         _ensure_freeze_support_prelude(guard)
-        self.assertEqual(len(guard.body), 4)
-        self.assertIsInstance(guard.body[0], ast.ImportFrom)
-        call = _no_argument_call(guard.body[1])
+        self.assertEqual(len(guard.body), 6)
+        self.assertIsInstance(guard.body[0], ast.Import)
+        self.assertIsInstance(guard.body[1], ast.ImportFrom)
+        self.assertIsInstance(guard.body[2], ast.FunctionDef)
+        self.assertIsInstance(guard.body[3], ast.If)
+        call = _no_argument_call(guard.body[3].body[0])
         self.assertIsNotNone(call)
         self.assertIsInstance(call.func, ast.Name)
-        self.assertEqual(call.func.id, "freeze_support")
+        self.assertEqual(call.func.id, "__pysuture_freeze_support")
+
+    def test_injected_strict_freeze_support_prelude_is_idempotent(self) -> None:
+        guard = ast.If(
+            test=ast.Constant(value=True),
+            body=ast.parse("start_children()\n").body,
+            orelse=[],
+        )
+        _ensure_freeze_support_prelude(guard)
+        length = len(guard.body)
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), length)
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")

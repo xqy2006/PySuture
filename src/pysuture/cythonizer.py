@@ -82,7 +82,39 @@ def _no_argument_call(statement: ast.stmt) -> ast.Call | None:
     return call
 
 
+def _strict_freeze_support_prelude() -> list[ast.stmt]:
+    return ast.parse(
+        """
+import sys as __pysuture_multiprocessing_sys
+from multiprocessing import freeze_support as __pysuture_freeze_support
+
+def __pysuture_decimal_argument(argument, prefix):
+    if not argument.startswith(prefix):
+        return False
+    value = argument[len(prefix):]
+    if not value or not value.isascii() or not value.isdecimal():
+        return False
+    value = value.lstrip("0") or "0"
+    return len(value) < 20 or (len(value) == 20 and value <= "18446744073709551615")
+
+if (
+    len(__pysuture_multiprocessing_sys.argv) == 4
+    and __pysuture_multiprocessing_sys.argv[1] == "--multiprocessing-fork"
+    and __pysuture_decimal_argument(__pysuture_multiprocessing_sys.argv[2], "parent_pid=")
+    and __pysuture_decimal_argument(__pysuture_multiprocessing_sys.argv[3], "pipe_handle=")
+):
+    __pysuture_freeze_support()
+"""
+    ).body
+
+
 def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
+    strict = _strict_freeze_support_prelude()
+    if len(body) >= len(strict) and all(
+        ast.dump(actual, include_attributes=False) == ast.dump(expected, include_attributes=False)
+        for actual, expected in zip(body, strict)
+    ):
+        return True
     if len(body) < 2:
         return False
     first = body[0]
@@ -114,14 +146,7 @@ def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
 def _ensure_freeze_support_prelude(guard: ast.If) -> None:
     if _has_freeze_support_prelude(guard.body):
         return
-    guard.body[0:0] = [
-        ast.ImportFrom(
-            module="multiprocessing",
-            names=[ast.alias(name="freeze_support")],
-            level=0,
-        ),
-        ast.Expr(value=ast.Call(func=ast.Name(id="freeze_support", ctx=ast.Load()), args=[], keywords=[])),
-    ]
+    guard.body[0:0] = _strict_freeze_support_prelude()
 
 
 def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bool) -> tuple[Path, bool]:
