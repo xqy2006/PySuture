@@ -1011,8 +1011,10 @@ class CoreTests(unittest.TestCase):
         self._write_project("pass\n")
         cases = {
             ".env.production": "TOKEN=secret\n",
+            ".envrc": "export TOKEN=secret\n",
             "client_secret-production.json": '{"client_secret": "secret"}\n',
             "id_ed25519.backup": "private material\n",
+            "secrets.toml": 'token = "secret"\n',
             "renamed-config.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
             "late-key.txt": "x" * (128 * 1024) + "-----BEGIN PRIVATE KEY-----\nsecret\n",
         }
@@ -1025,6 +1027,22 @@ class CoreTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(BuildError, "credential"):
                     collect_application_resources(config)
+
+    def test_public_ssh_key_name_is_not_treated_as_private(self) -> None:
+        self._write_project("pass\n")
+        (self.root / "id_ed25519.pub").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("id_ed25519.pub", "keys/id_ed25519.pub"),),
+        )
+
+        records, warnings = collect_application_resources(config)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([record.target for record in records], ["keys/id_ed25519.pub"])
 
     def test_secret_resource_policy_can_warn_or_allow(self) -> None:
         self._write_project("pass\n")
