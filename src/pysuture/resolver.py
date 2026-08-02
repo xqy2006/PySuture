@@ -26,6 +26,7 @@ LOCKED_METADATA_DEFAULTS = {
     "libraries": [],
     "wholearchive": [],
     "system_libraries": [],
+    "suppressed_system_libraries": [],
     "sources": [],
     "license": {},
     "top_level_import_names": [],
@@ -431,12 +432,21 @@ def validate_pack_runtime_compatibility(
     for owner, metadata in packs:
         dependencies = metadata.get("dependencies", [])
         conflicts = metadata.get("conflicts", [])
+        suppressed_system_libraries = metadata.get("suppressed_system_libraries", [])
         if not isinstance(dependencies, list) or not all(
             isinstance(name, str) and name for name in dependencies
         ):
             raise LockError(f"pack {owner} has invalid dependency metadata")
         if not isinstance(conflicts, list) or not all(isinstance(name, str) and name for name in conflicts):
             raise LockError(f"pack {owner} has invalid conflict metadata")
+        if not isinstance(suppressed_system_libraries, list) or not all(
+            isinstance(name, str)
+            and name.lower().endswith(".lib")
+            and "/" not in name
+            and "\\" not in name
+            for name in suppressed_system_libraries
+        ):
+            raise LockError(f"pack {owner} has invalid suppressed system library metadata")
         missing = [name for name in dependencies if name.casefold() not in selected_names]
         if missing:
             raise LockError(f"pack {owner} dependencies are missing from the lock: {', '.join(missing)}")

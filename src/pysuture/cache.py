@@ -56,6 +56,25 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 
+def _github_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "PySuture/0.1 (+https://github.com/xqy2006/PySuture)",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = next(
+        (
+            value.strip()
+            for name in ("PYSUTURE_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+            if (value := os.environ.get(name)) and value.strip()
+        ),
+        "",
+    )
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def _latest_prerelease_asset_url(releases: object, asset_name: str) -> str:
     if not isinstance(releases, list):
         return ""
@@ -129,14 +148,7 @@ def fetch_index(url: str, *, offline: bool = False) -> tuple[bytes, Path]:
         if not separator or not separator2 or not owner or not repository or not asset_name:
             raise LockError(f"invalid github+latest index URL: {url}")
         api_url = f"https://api.github.com/repos/{owner}/{repository}/releases?per_page=30"
-        api_request = Request(
-            api_url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "PySuture/0.1 (+https://github.com/xqy2006/PySuture)",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
+        api_request = Request(api_url, headers=_github_api_headers())
         try:
             with urlopen(api_request, timeout=60) as response:
                 releases = json.loads(response.read().decode("utf-8"))
