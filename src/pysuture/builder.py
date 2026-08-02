@@ -217,10 +217,35 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
     return sorted(set(names), key=str.casefold)
 
 
+def _classify_main_object_records(
+    map_text: str,
+    allowed_pack_libraries: set[str],
+) -> tuple[list[str], list[str]]:
+    records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    normalized_libraries = {
+        Path(name).name.casefold()
+        for name in allowed_pack_libraries
+        if isinstance(name, str) and name.lower().endswith(".lib")
+    }
+    allowed = []
+    forbidden = []
+    for record in records:
+        normalized_record = record.casefold()
+        destination = (
+            allowed
+            if any(library in normalized_record for library in normalized_libraries)
+            else forbidden
+        )
+        destination.append(record)
+    return allowed, forbidden
+
+
 def audit_executable(
     executable: Path,
     map_path: Path,
     toolchain: MSVCToolchain,
+    *,
+    allowed_pack_libraries: set[str] | None = None,
 ) -> dict:
     dependents = _run(
         [str(toolchain.dumpbin), "/NOLOGO", "/DEPENDENTS", str(executable)],
@@ -245,14 +270,18 @@ def audit_executable(
         symbol for symbol in FORBIDDEN_ENTRY_SYMBOLS
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", map_text)
     ]
-    main_objects = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
+        map_text,
+        allowed_pack_libraries or set(),
+    )
     report = {
         "status": "passed",
         "dependencies": dependencies,
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "main_object_records": main_objects,
+        "allowed_pack_main_object_records": allowed_main_objects,
+        "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
     }
     failures = []
@@ -262,8 +291,9 @@ def audit_executable(
         failures.append("non-system DLLs: " + ", ".join(non_system_dependencies))
     if forbidden_symbols:
         failures.append("generic Python entry symbols: " + ", ".join(forbidden_symbols))
-    if main_objects:
-        failures.append("main.obj was linked")
+    if forbidden_main_objects:
+        origins = [" ".join(record.split())[:300] for record in forbidden_main_objects[:5]]
+        failures.append("forbidden main.obj records: " + " | ".join(origins))
     if failures:
         report["status"] = "failed"
         raise BuildError("PE audit failed: " + "; ".join(failures))
@@ -470,7 +500,12 @@ def build_executable(
     )
     if not executable.is_file():
         raise BuildError("linker did not produce the executable")
-    audit = audit_executable(executable, map_path, toolchain)
+    audit = audit_executable(
+        executable,
+        map_path,
+        toolchain,
+        allowed_pack_libraries={path.name for path in pack_libraries},
+    )
     dist_dir = config.root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
     destination = dist_dir / executable.name
