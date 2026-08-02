@@ -19,6 +19,7 @@ from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
 from .resolver import (
+    PLAIN_LIBRARY_NAME_PATTERN,
     validate_locked_asset_metadata,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
@@ -39,6 +40,31 @@ REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
     "shell32.lib",
     "user32.lib",
 )
+
+
+def _resolve_system_libraries(libraries: list[str], suppressed: list[str]) -> list[str]:
+    required_names = {name.casefold() for name in REQUIRED_WINDOWS_SYSTEM_LIBRARIES}
+    suppressed_names: set[str] = set()
+    for library in suppressed:
+        name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid suppressed system library name: {name!r}")
+        key = name.casefold()
+        if key in required_names:
+            raise BuildError(f"packs cannot suppress required Windows system library {name}")
+        suppressed_names.add(key)
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for library in libraries:
+        name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid system library name: {name!r}")
+        key = name.casefold()
+        if key in suppressed_names or key in seen:
+            continue
+        seen.add(key)
+        resolved.append(name)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -203,10 +229,37 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
     return sorted(set(names), key=str.casefold)
 
 
+def _classify_main_object_records(
+    map_text: str,
+    allowed_pack_libraries: set[str],
+) -> tuple[list[str], list[str]]:
+    records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_archive_patterns = [
+        re.compile(
+            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(name).name[:-4])}(?:\.lib)?[:(]main\.obj(?:\)|\b)"
+        )
+        for name in allowed_pack_libraries
+        if isinstance(name, str) and name.lower().endswith(".lib")
+    ]
+    allowed = []
+    forbidden = []
+    for record in records:
+        normalized_record = record.casefold()
+        destination = (
+            allowed
+            if any(pattern.search(normalized_record) for pattern in allowed_archive_patterns)
+            else forbidden
+        )
+        destination.append(record)
+    return allowed, forbidden
+
+
 def audit_executable(
     executable: Path,
     map_path: Path,
     toolchain: MSVCToolchain,
+    *,
+    allowed_pack_libraries: set[str] | None = None,
 ) -> dict:
     dependents = _run(
         [str(toolchain.dumpbin), "/NOLOGO", "/DEPENDENTS", str(executable)],
@@ -231,14 +284,18 @@ def audit_executable(
         symbol for symbol in FORBIDDEN_ENTRY_SYMBOLS
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", map_text)
     ]
-    main_objects = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
+        map_text,
+        allowed_pack_libraries or set(),
+    )
     report = {
         "status": "passed",
         "dependencies": dependencies,
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "main_object_records": main_objects,
+        "allowed_pack_main_object_records": allowed_main_objects,
+        "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
     }
     failures = []
@@ -248,8 +305,9 @@ def audit_executable(
         failures.append("non-system DLLs: " + ", ".join(non_system_dependencies))
     if forbidden_symbols:
         failures.append("generic Python entry symbols: " + ", ".join(forbidden_symbols))
-    if main_objects:
-        failures.append("main.obj was linked")
+    if forbidden_main_objects:
+        origins = [" ".join(record.split())[:300] for record in forbidden_main_objects[:5]]
+        failures.append("forbidden main.obj records: " + " | ".join(origins))
     if failures:
         report["status"] = "failed"
         raise BuildError("PE audit failed: " + "; ".join(failures))
@@ -329,6 +387,7 @@ def build_executable(
     pack_libraries_by_name: dict[str, tuple[Path, str]] = {}
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
+    suppressed_system_libraries: list[str] = []
     for locked_record, pack_root, metadata in assets.packs:
         symbol = metadata.get("descriptor_symbol")
         if not isinstance(symbol, str) or not symbol:
@@ -358,6 +417,7 @@ def build_executable(
                 raise BuildError(f"pack {locked_record['name']} wholearchive library is missing: {library_name}")
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
+        suppressed_system_libraries.extend(metadata.get("suppressed_system_libraries", []))
 
     wholearchive_paths = list(dict.fromkeys(wholearchive_paths))
 
@@ -417,7 +477,7 @@ def build_executable(
         runtime_libraries.append(_safe_member(library_dir, library_name))
     system_libraries.extend(assets.runtime_metadata.get("system_libraries", []))
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
-    system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
+    system_libraries = _resolve_system_libraries(system_libraries, suppressed_system_libraries)
 
     executable = build_dir / f"{output_name}.exe"
     map_path = build_dir / f"{output_name}.map"
@@ -454,7 +514,12 @@ def build_executable(
     )
     if not executable.is_file():
         raise BuildError("linker did not produce the executable")
-    audit = audit_executable(executable, map_path, toolchain)
+    audit = audit_executable(
+        executable,
+        map_path,
+        toolchain,
+        allowed_pack_libraries={path.name for path in pack_libraries},
+    )
     dist_dir = config.root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
     destination = dist_dir / executable.name

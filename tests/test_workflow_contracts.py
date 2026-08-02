@@ -24,6 +24,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.staticpython_commit", workflow)
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", workflow)
 
+    def test_runtime_executables_run_inside_the_snapshotted_directory(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertGreaterEqual(workflow.count("Push-Location $work"), 2)
+        self.assertIn("-WorkingDirectory $work", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -98,9 +98,26 @@ jobs:
         shell: pwsh
         run: |
           Push-Location .\examples\smoke
-          pysuture lock --update --python "${{ matrix.python }}"
-          pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
-          Pop-Location
+          try {
+            pysuture lock --update --python "${{ matrix.python }}"
+            if ($LASTEXITCODE -ne 0) { throw "pysuture lock failed with $LASTEXITCODE" }
+            pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
+            if ($LASTEXITCODE -ne 0) { throw "pysuture build failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+      - name: Upload failed build map
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-build-${{ matrix.python }}-${{ matrix.mode }}
+          path: |
+            examples/smoke/.pysuture/build/**/*.map
+            examples/smoke/.pysuture/build/**/*.rsp
+            examples/smoke/.pysuture/build/**/build-report.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Console Unicode, resource, argv, and multiprocessing smoke
         if: matrix.mode == 'console'
         shell: pwsh
@@ -114,8 +131,14 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
-          if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          Push-Location $work
+          try {
+            & ".\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
+            if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "runtime created or extracted files" }
       - name: Windowed startup smoke
@@ -132,14 +155,124 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          $process = Start-Process $exe -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
+          $process = Start-Process $exe `
+            -ArgumentList @("--quiet") `
+            -WorkingDirectory $work `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
           if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
 
+  ui-pack-e2e:
+    needs: candidate
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate
+      - name: Install build frontend
+        run: python -m pip install -e ".[build]"
+      - name: Configure exact candidate
+        shell: pwsh
+        run: |
+          Copy-Item .\candidate\candidate-index.json .\examples\wx-fltk-smoke\runtime-index.v1.json
+      - name: Lock and build wxPython plus pyfltk
+        shell: pwsh
+        run: |
+          Push-Location .\examples\wx-fltk-smoke
+          try {
+            pysuture lock --update --python "${{ matrix.python }}"
+            if ($LASTEXITCODE -ne 0) { throw "pysuture lock failed with $LASTEXITCODE" }
+            $lock = Get-Content .\pysuture.lock -Raw | ConvertFrom-Json
+            $packsByName = @{}
+            foreach ($pack in @($lock.packs)) {
+              $name = [string]$pack.name
+              if ($packsByName.ContainsKey($name)) { throw "duplicate pack in lock: $name" }
+              $packsByName[$name] = $pack
+            }
+            $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $pending = [System.Collections.Generic.Queue[string]]::new()
+            foreach ($rootPack in @("pyfltk", "wxpython")) { $pending.Enqueue($rootPack) }
+            while ($pending.Count -gt 0) {
+              $name = $pending.Dequeue()
+              if (-not $expected.Add($name)) { continue }
+              if (-not $packsByName.ContainsKey($name)) { throw "required pack is missing from lock: $name" }
+              foreach ($dependency in @($packsByName[$name].dependencies)) {
+                $pending.Enqueue([string]$dependency)
+              }
+            }
+            $unexpected = @($packsByName.Keys | Where-Object { -not $expected.Contains($_) } | Sort-Object)
+            if ($unexpected.Count -gt 0) {
+              throw "lock contains packs outside the requested dependency closure: $($unexpected -join ', ')"
+            }
+            $wx = @($lock.packs | Where-Object name -eq "wxpython")
+            $fltk = @($lock.packs | Where-Object name -eq "pyfltk")
+            if ($wx.Count -ne 1 -or @($wx[0].suppressed_system_libraries) -notcontains "gdiplus.lib") {
+              throw "wxpython lock record does not suppress gdiplus.lib"
+            }
+            if ($fltk.Count -ne 1 -or @($fltk[0].system_libraries) -notcontains "gdiplus.lib") {
+              throw "pyfltk lock record does not request gdiplus.lib"
+            }
+            pysuture build `
+              --python "${{ matrix.python }}" `
+              --mode console `
+              --output "wx-fltk-${{ matrix.python }}" `
+              --frozen-lock
+            if ($LASTEXITCODE -ne 0) { throw "pysuture build failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+      - name: Upload failed UI link evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-ui-link-${{ matrix.python }}
+          path: |
+            examples/wx-fltk-smoke/.pysuture/build/**/*.map
+            examples/wx-fltk-smoke/.pysuture/build/**/*.rsp
+            examples/wx-fltk-smoke/.pysuture/build/**/build-report.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Run without external runtimes or extraction
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-wx-fltk-${{ matrix.python }}"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $exe = Join-Path $work "wx-fltk-${{ matrix.python }}.exe"
+          Copy-Item ".\examples\wx-fltk-smoke\dist\wx-fltk-${{ matrix.python }}.exe" $exe
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          Push-Location $work
+          try {
+            & $exe "参数 空格" "路径-中文"
+            if ($LASTEXITCODE -ne 0) { throw "wxPython plus pyfltk executable failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "wxPython plus pyfltk runtime created or extracted files" }
+
   propose-update:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.propose_update }}
-    needs: [candidate, e2e]
+    needs: [candidate, e2e, ui-pack-e2e]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
