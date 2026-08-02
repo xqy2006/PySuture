@@ -18,8 +18,10 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: sync-staticpython
-  cancel-in-progress: false
+  # Keep duplicate validations for one ref out of the queue without making
+  # independent feature candidates wait behind each other.
+  group: sync-staticpython-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   candidate:
