@@ -799,6 +799,14 @@ class CoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(LockError, "could not extract verified asset"):
                     extract_asset(archive_path, digest)
 
+    def test_extract_asset_translates_invalid_archive_filename_encoding(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        decode_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch("pysuture.cache.ZipFile", side_effect=decode_error):
+                with self.assertRaisesRegex(LockError, "could not validate asset archive"):
+                    extract_asset(archive_path, digest)
+
     def test_extract_asset_serializes_concurrent_initialization(self) -> None:
         archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
         with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):

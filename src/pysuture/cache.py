@@ -19,6 +19,14 @@ from .errors import LockError
 _EXTRACTED_MARKER_NAME = ".pysuture-extracted.json"
 _EXTRACTED_MANIFEST_VERSION = 1
 _CACHE_LOCK_TIMEOUT_SECONDS = 120.0
+_ARCHIVE_ERRORS = (
+    BadZipFile,
+    EOFError,
+    NotImplementedError,
+    OSError,
+    RuntimeError,
+    UnicodeError,
+)
 _WINDOWS_RESERVED_NAMES = {
     "aux",
     "clock$",
@@ -426,20 +434,23 @@ def _open_verified_archive(path: Path, expected_sha256: str):
 
     archive: ZipFile | None = None
     try:
-        _size, actual_sha256 = _hash_stream(handle)
+        try:
+            _size, actual_sha256 = _hash_stream(handle)
+            handle.seek(0)
+        except OSError as exc:
+            raise LockError(f"could not hash or rewind asset archive {path}: {exc}") from exc
         if actual_sha256 != expected_sha256:
             raise LockError(
                 f"SHA-256 mismatch for cached asset {path}: "
                 f"expected {expected_sha256}, got {actual_sha256}"
             )
-        handle.seek(0)
         try:
             archive = ZipFile(handle)
             members = _validated_archive_members(archive)
             tree = _archive_tree_manifest(archive, members)
         except LockError:
             raise
-        except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+        except _ARCHIVE_ERRORS as exc:
             raise LockError(f"could not validate asset archive {path}: {exc}") from exc
         yield handle, archive, members, tree
     finally:
@@ -449,12 +460,13 @@ def _open_verified_archive(path: Path, expected_sha256: str):
 
 
 def _verify_open_archive_sha256(handle: object, expected_sha256: str) -> None:
-    position = handle.tell()  # type: ignore[attr-defined]
     try:
+        position = handle.tell()  # type: ignore[attr-defined]
         handle.seek(0)  # type: ignore[attr-defined]
         _size, actual_sha256 = _hash_stream(handle)
-    finally:
         handle.seek(position)  # type: ignore[attr-defined]
+    except OSError as exc:
+        raise LockError(f"could not recheck the open asset archive: {exc}") from exc
     if actual_sha256 != expected_sha256:
         raise LockError(
             "asset archive changed during manifest generation or extraction: "
@@ -509,14 +521,14 @@ def extract_asset(path: Path, sha256: str) -> Path:
                     _extract_validated_members(archive, staging, members)
                 except LockError:
                     raise
-                except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+                except _ARCHIVE_ERRORS as exc:
                     raise LockError(f"could not extract verified asset archive {path}: {exc}") from exc
                 _verify_open_archive_sha256(handle, expected_sha256)
                 try:
                     verified_tree = _archive_tree_manifest(archive, members)
                 except LockError:
                     raise
-                except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+                except _ARCHIVE_ERRORS as exc:
                     raise LockError(f"could not revalidate asset archive {path}: {exc}") from exc
                 if verified_tree != tree:
                     raise LockError(f"asset archive contents changed during extraction: {path}")
