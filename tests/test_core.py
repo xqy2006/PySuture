@@ -54,7 +54,7 @@ from pysuture.resolver import (
     validate_pack_composition,
     validate_pack_runtime_compatibility,
 )
-from pysuture.resources import collect_application_resources
+from pysuture.resources import ResourceRecord, collect_application_resources, write_resource_sources
 from pysuture.toolchain import MSVCToolchain, locked_toolchain_mismatches, validate_locked_toolchain
 
 
@@ -880,6 +880,56 @@ class CoreTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(BuildError, "credential"):
             collect_application_resources(config)
+
+    def test_resource_embedding_rejects_source_drift(self) -> None:
+        source = self.root / "payload.bin"
+        source.write_bytes(b"original")
+        record = ResourceRecord(
+            source=source,
+            target="assets/payload.bin",
+            sha256=sha256_bytes(b"original"),
+            size=8,
+        )
+        source.write_bytes(b"modified")
+        generated_dir = self.root / "generated"
+        with self.assertRaisesRegex(BuildError, "changed after collection"):
+            write_resource_sources([record], generated_dir)
+        self.assertFalse((generated_dir / "resource_000001.c").exists())
+
+    def test_resource_embedding_rejects_cross_origin_target_collisions(self) -> None:
+        first = self.root / "application-license.txt"
+        second = self.root / "runtime-license.txt"
+        first.write_bytes(b"application")
+        second.write_bytes(b"runtime")
+        records = [
+            ResourceRecord(
+                source=first,
+                target="licenses/runtime-sdk/LICENSE.txt",
+                sha256=sha256_bytes(b"application"),
+                size=11,
+            ),
+            ResourceRecord(
+                source=second,
+                target="licenses/runtime-sdk/LICENSE.txt",
+                sha256=sha256_bytes(b"runtime"),
+                size=7,
+            ),
+        ]
+        with self.assertRaisesRegex(BuildError, "multiple resources map"):
+            write_resource_sources(records, self.root / "generated")
+
+    def test_resource_embedding_reports_removed_source(self) -> None:
+        source = self.root / "removed.bin"
+        source.write_bytes(b"present")
+        record = ResourceRecord(
+            source=source,
+            target="assets/removed.bin",
+            sha256=sha256_bytes(b"present"),
+            size=7,
+        )
+        source.unlink()
+        with self.assertRaisesRegex(BuildError, "could not reread collected resource"):
+            write_resource_sources([record], self.root / "generated")
 
     def test_zip_extraction_rejects_parent_traversal(self) -> None:
         archive_path = self.root / "unsafe.zip"
