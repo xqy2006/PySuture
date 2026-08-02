@@ -24,6 +24,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.staticpython_commit", workflow)
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", workflow)
 
+    def test_windowed_e2e_runs_full_unicode_multiprocessing_smoke(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "Windowed Unicode, resource, argv, and multiprocessing smoke",
+            workflow,
+        )
+        self.assertIn('@("--self-test", "参数 空格", "路径-中文")', workflow)
+        self.assertIn("$windowInfo.ArgumentList.Add($_)", workflow)
+        self.assertNotIn('$exe -ArgumentList @("--quiet")', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

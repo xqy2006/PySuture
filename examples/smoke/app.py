@@ -44,6 +44,8 @@ def nested_parent(queue, value: int) -> None:
 
 
 def self_test() -> int:
+    if sys.argv[1:] != ["--self-test", "参数 空格", "路径-中文"]:
+        return 9
     payload = json.loads(Path("assets/payload.json").read_text(encoding="utf-8"))
     if payload != {"message": "静态资源", "ok": True}:
         return 10
