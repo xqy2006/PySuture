@@ -527,6 +527,13 @@ class CoreTests(unittest.TestCase):
                 payload,
                 replace(config, packages={"missing-pack": ""}),
             )
+        duplicate = dict(payload)
+        duplicate["packs"] = [
+            *payload["packs"],
+            {**payload["packs"][0], "name": payload["packs"][0]["name"].upper()},
+        ]
+        with self.assertRaisesRegex(LockError, "duplicate pack records"):
+            validate_lock_for_configuration(duplicate, config)
 
         write_lock(self.root, payload)
         stderr = io.StringIO()

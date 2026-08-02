@@ -108,7 +108,10 @@ def validate_lock_for_configuration(lock: dict, config: ProjectConfig) -> None:
         version = record.get("version")
         if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
             raise LockError("pysuture.lock contains a pack without a valid name and version")
-        locked_packs[name.casefold()] = (name, version)
+        normalized_name = name.casefold()
+        if normalized_name in locked_packs:
+            raise LockError(f"pysuture.lock contains duplicate pack records for {name!r}")
+        locked_packs[normalized_name] = (name, version)
 
     for requested_name, raw_specifier in config.packages.items():
         locked = locked_packs.get(requested_name.casefold())
