@@ -76,7 +76,8 @@ Windows-safe filename stem (without `.exe`). `pysuture init` parses an existing
   `--offline` forbids downloads and `--frozen-lock` additionally rejects project
   source drift, making it suitable for CI.
 - `pysuture doctor` checks VS 2022, MSVC, the Windows SDK, cache state, and exact
-  lock/toolchain compatibility.
+  lock schema, asset-record integrity, and toolchain compatibility. A missing
+  lock is reported as skipped; an existing malformed lock fails.
 
 Build-time overrides include `--python`, `--mode`, `--output`, repeated
 `--include-module`, repeated `--include-package`, and repeated

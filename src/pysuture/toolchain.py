@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .cache import cache_root
-from .errors import BuildError
+from .errors import BuildError, LockError
+from .lockfile import validate_asset_records
 
 
 @dataclass(frozen=True)
@@ -194,7 +195,7 @@ def discover_msvc() -> MSVCToolchain:
     )
 
 
-def doctor_report(lock: dict | None = None) -> dict:
+def doctor_report(lock: dict | None = None, *, lock_error: str | None = None) -> dict:
     checks: list[dict] = []
     try:
         toolchain = discover_msvc()
@@ -226,21 +227,48 @@ def doctor_report(lock: dict | None = None) -> dict:
         checks.append({"name": "cache", "status": "failed", "detail": str(exc)})
     else:
         checks.append({"name": "cache", "status": "passed", "detail": str(cache)})
-    if lock is not None:
-        locked_toolchain = lock.get("toolchain", {})
-        mismatches = (
-            locked_toolchain_mismatches(locked_toolchain, toolchain)
-            if toolchain is not None
-            else {"toolchain": {"expected": "available", "actual": None}}
-        )
+    if lock_error is not None:
+        checks.append({"name": "lock", "status": "failed", "detail": lock_error})
+    elif lock is None:
         checks.append(
             {
-                "name": "locked-toolchain",
-                "status": "passed" if not mismatches else "failed",
-                "detail": mismatches or toolchain.identity(),
+                "name": "lock",
+                "status": "skipped",
+                "detail": "pysuture.lock does not exist",
             }
         )
+    else:
+        try:
+            validate_asset_records(lock)
+        except LockError as exc:
+            checks.append({"name": "lock", "status": "failed", "detail": str(exc)})
+        else:
+            checks.append(
+                {
+                    "name": "lock",
+                    "status": "passed",
+                    "detail": f"{1 + len(lock['packs'])} immutable asset record(s)",
+                }
+            )
+    if lock is not None:
+        locked_toolchain = lock.get("toolchain", {})
+        try:
+            mismatches = (
+                locked_toolchain_mismatches(locked_toolchain, toolchain)
+                if toolchain is not None
+                else {"toolchain": {"expected": "available", "actual": None}}
+            )
+        except BuildError as exc:
+            checks.append({"name": "locked-toolchain", "status": "failed", "detail": str(exc)})
+        else:
+            checks.append(
+                {
+                    "name": "locked-toolchain",
+                    "status": "passed" if not mismatches else "failed",
+                    "detail": mismatches or toolchain.identity(),
+                }
+            )
     return {
-        "status": "passed" if all(check["status"] == "passed" for check in checks) else "failed",
+        "status": "failed" if any(check["status"] == "failed" for check in checks) else "passed",
         "checks": checks,
     }
