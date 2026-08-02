@@ -18,7 +18,10 @@ SECRET_NAME_PATTERNS = (
         r"^(?:credentials|secrets?|client[_-]?secret|service[_-]?account)(?:[._-].+)?"
         r"(?:\.json|\.toml|\.ya?ml)?$"
     ),
-    re.compile(r"^id_(?:dsa|ecdsa|ed25519|rsa)(?!\.pub$)(?:[._-].+)?$"),
+    re.compile(
+        r"^id_(?:dsa|ecdsa|ed25519|rsa)"
+        r"(?!\.pub(?:$|[._-]))(?:[._-].+)?$"
+    ),
 )
 PRIVATE_KEY_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
