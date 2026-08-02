@@ -201,7 +201,7 @@ def write_launcher(
         + "    PyObject *meta_path = sys_module != NULL ? PyObject_GetAttrString(sys_module, \"meta_path\") : NULL;\n"
         + "    if (finder == NULL || sys_module == NULL || meta_path == NULL\n"
         + "        || PyModule_AddFunctions(finder, pysuture_namespace_finder_methods) < 0\n"
-        + "        || PyList_Insert(meta_path, 0, finder) < 0) {\n"
+        + "        || PyList_Append(meta_path, finder) < 0) {\n"
         + "        Py_XDECREF(meta_path); Py_XDECREF(sys_module); Py_XDECREF(finder);\n"
         + "        return -1;\n"
         + "    }\n"

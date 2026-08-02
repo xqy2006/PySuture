@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import email
 import importlib.util
+import json
 import multiprocessing
 import os
 import sys
@@ -77,6 +78,10 @@ def self_test() -> int:
         or namespace_value() != "namespace-ok"
     ):
         return 18
+    # ``email`` also has an application namespace portion under this source
+    # tree. Its regular frozen stdlib package must win over that portion.
+    if not callable(getattr(email, "message_from_string", None)):
+        return 19
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))
