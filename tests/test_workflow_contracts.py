@@ -38,6 +38,22 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(workflow.count("Set-Location $work"), 2)
         self.assertIn("$windowInfo.WorkingDirectory = $work", workflow)
         self.assertNotIn('$exe -ArgumentList @("--quiet")', workflow)
+    def test_staticpython_gate_rebuilds_one_frozen_lock_below_two_roots(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
+            encoding="utf-8"
+        )
+        script = (ROOT / "scripts" / "check_frozen_lock_determinism.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("  determinism:\n", workflow)
+        self.assertIn("check_frozen_lock_determinism.py", workflow)
+        self.assertIn("needs: [candidate, e2e, determinism]", workflow)
+        self.assertIn("second-location-with-a-different-length", script)
+        self.assertIn('"--frozen-lock"', script)
+        self.assertIn('"--offline"', script)
+        self.assertIn('REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map")', script)
+        self.assertIn("frozen build mutated pysuture.lock", script)
 
 
 if __name__ == "__main__":
