@@ -487,6 +487,8 @@ class CoreTests(unittest.TestCase):
         )
         text = launcher.read_text(encoding="utf-8")
         self.assertIn("config.parse_argv = 0", text)
+        self.assertIn("&config.stdio_encoding, L\"utf-8\"", text)
+        self.assertIn("&config.stdio_errors, L\"strict\"", text)
         self.assertIn("--multiprocessing-fork", text)
         self.assertIn("return argc == 4", text)
         self.assertIn('L"parent_pid="', text)
