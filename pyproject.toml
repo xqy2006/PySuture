@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pysuture"
-version = "0.1.0.dev0"
+version = "0.1.0a1"
 description = "Build Cythonized Python applications as non-extracting, statically linked Windows executables"
 readme = "README.md"
 requires-python = ">=3.11"
