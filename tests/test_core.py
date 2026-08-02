@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import json
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import io
+import json
+import os
+import stat
 import sys
 import tempfile
 import unittest
+import zlib
 from unittest import mock
 from dataclasses import replace
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +23,16 @@ if str(SRC_ROOT) not in sys.path:
 
 from pysuture.analyzer import _private_package_modules, analyze_project
 from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
-from pysuture.cache import _latest_prerelease_asset_url, _safe_extract, sha256_bytes
+from pysuture.cache import (
+    _cache_matches_manifest,
+    _extract_validated_members,
+    _latest_prerelease_asset_url,
+    _publish_extracted_cache,
+    _safe_extract,
+    extract_asset,
+    sha256_bytes,
+    sha256_file,
+)
 from pysuture.cli import main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import cythonize_modules, installed_cython_version
@@ -49,6 +62,18 @@ class CoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _write_asset_archive(
+        self,
+        entries: list[tuple[str, bytes | str]],
+        *,
+        name: str = "asset.zip",
+    ) -> tuple[Path, str]:
+        archive_path = self.root / name
+        with ZipFile(archive_path, "w") as archive:
+            for member, payload in entries:
+                archive.writestr(member, payload)
+        return archive_path, sha256_file(archive_path)
 
     def test_windows_link_baseline_includes_security_apis(self) -> None:
         self.assertIn("advapi32.lib", REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
@@ -583,6 +608,245 @@ class CoreTests(unittest.TestCase):
         with ZipFile(archive_path) as archive:
             with self.assertRaisesRegex(LockError, "unsafe path"):
                 _safe_extract(archive, self.root / "extract")
+
+    def test_zip_extraction_rejects_windows_unsafe_path(self) -> None:
+        archive_path = self.root / "unsafe-windows.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("payload.txt:stream", "bad")
+        with ZipFile(archive_path) as archive:
+            with self.assertRaisesRegex(LockError, "unsafe Windows path"):
+                _safe_extract(archive, self.root / "extract")
+
+    def test_zip_extraction_rejects_windows_invalid_character(self) -> None:
+        archive_path = self.root / "unsafe-windows-character.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("payload?.txt", "bad")
+        with ZipFile(archive_path) as archive:
+            with self.assertRaisesRegex(LockError, "unsafe Windows path"):
+                _safe_extract(archive, self.root / "extract")
+
+    def test_zip_extraction_rejects_extended_windows_device_name(self) -> None:
+        archive_path = self.root / "unsafe-windows-device.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("COM¹.txt", "bad")
+        with ZipFile(archive_path) as archive:
+            with self.assertRaisesRegex(LockError, "unsafe Windows path"):
+                _safe_extract(archive, self.root / "extract")
+
+    def test_extract_asset_reuses_valid_manifest(self) -> None:
+        archive_path, digest = self._write_asset_archive(
+            [("sdk/include/Python.h", "header"), ("sdk/libs/python.lib", b"library")]
+        )
+        cache = self.root / "cache"
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(cache)}):
+            first = extract_asset(archive_path, digest)
+            marker = json.loads((first / ".pysuture-extracted.json").read_text(encoding="utf-8"))
+            self.assertEqual(marker["manifest_version"], 1)
+            self.assertEqual(marker["directories"], ["sdk", "sdk/include", "sdk/libs"])
+            self.assertEqual(
+                [entry["path"] for entry in marker["files"]],
+                ["sdk/include/Python.h", "sdk/libs/python.lib"],
+            )
+            with mock.patch("pysuture.cache._publish_extracted_cache") as publish:
+                second = extract_asset(archive_path, digest)
+            publish.assert_not_called()
+        self.assertEqual(first, second)
+
+    def test_extract_asset_rebuilds_tampered_file(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            target = extracted / "payload" / "data.bin"
+            target.write_bytes(b"tampered")
+            rebuilt = extract_asset(archive_path, digest)
+        self.assertEqual(rebuilt, extracted)
+        self.assertEqual(target.read_bytes(), b"verified")
+
+    def test_extract_asset_rebuilds_truncated_file(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            target = extracted / "payload" / "data.bin"
+            target.write_bytes(b"ver")
+            extract_asset(archive_path, digest)
+        self.assertEqual(target.read_bytes(), b"verified")
+
+    def test_extract_asset_rebuilds_deleted_file(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            target = extracted / "payload" / "data.bin"
+            target.unlink()
+            extract_asset(archive_path, digest)
+        self.assertEqual(target.read_bytes(), b"verified")
+
+    def test_extract_asset_rebuilds_cache_with_extra_file(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            extra = extracted / "unexpected.txt"
+            extra.write_text("not in archive", encoding="utf-8")
+            extract_asset(archive_path, digest)
+        self.assertFalse(extra.exists())
+
+    def test_extract_asset_rebuilds_cache_with_extra_empty_directory(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            extra = extracted / "unexpected-empty"
+            extra.mkdir()
+            extract_asset(archive_path, digest)
+        self.assertFalse(extra.exists())
+
+    def test_extract_asset_preserves_explicit_empty_directories(self) -> None:
+        archive_path, digest = self._write_asset_archive(
+            [("empty/", b""), ("payload/data.bin", b"verified")]
+        )
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            marker = json.loads(
+                (extracted / ".pysuture-extracted.json").read_text(encoding="utf-8")
+            )
+        self.assertTrue((extracted / "empty").is_dir())
+        self.assertEqual(marker["directories"], ["empty", "payload"])
+
+    def test_extract_asset_rejects_forged_file_manifest(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            target = extracted / "payload" / "data.bin"
+            target.write_bytes(b"tampered")
+            marker_path = extracted / ".pysuture-extracted.json"
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["files"][0].update(
+                size=len(b"tampered"),
+                sha256=sha256_bytes(b"tampered"),
+            )
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+            extract_asset(archive_path, digest)
+        self.assertEqual(target.read_bytes(), b"verified")
+
+    def test_extracted_cache_rejects_reparse_marker_before_reading(self) -> None:
+        destination = self.root / "extracted"
+        destination.mkdir()
+        marker = destination / ".pysuture-extracted.json"
+        tree = {"directories": [], "files": []}
+        marker.write_text(
+            json.dumps(
+                {
+                    "asset_sha256": "a" * 64,
+                    "directories": [],
+                    "files": [],
+                    "manifest_version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_stat = Path.stat
+
+        def stat_with_reparse(path: Path, *, follow_symlinks: bool = True):
+            result = original_stat(path, follow_symlinks=follow_symlinks)
+            if path == marker and not follow_symlinks:
+                return mock.Mock(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_file_attributes=0x400,
+                )
+            return result
+
+        with mock.patch.object(Path, "stat", autospec=True, side_effect=stat_with_reparse):
+            self.assertFalse(_cache_matches_manifest(destination, "a" * 64, tree))
+
+    def test_extract_asset_rejects_duplicate_normalized_members(self) -> None:
+        archive_path, digest = self._write_asset_archive(
+            [("Payload/data.bin", b"first"), ("payload/data.bin", b"second")]
+        )
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with self.assertRaisesRegex(LockError, "duplicate archive member"):
+                extract_asset(archive_path, digest)
+
+    def test_extract_asset_rejects_archive_mutation_after_initial_hash(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        archive_buffer = io.BytesIO(archive_path.read_bytes())
+        mutable_path = mock.Mock()
+        mutable_path.name = "mutable.zip"
+        mutable_path.open.return_value = archive_buffer
+
+        def extract_then_mutate(archive: ZipFile, destination: Path, members: object) -> None:
+            _extract_validated_members(archive, destination, members)  # type: ignore[arg-type]
+            handle = archive.fp
+            assert isinstance(handle, io.BytesIO)
+            payload = handle.getvalue()
+            handle.seek(0)
+            handle.write(bytes([payload[0] ^ 0xFF]) + payload[1:])
+
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._extract_validated_members",
+                side_effect=extract_then_mutate,
+            ):
+                with self.assertRaisesRegex(LockError, "archive changed during"):
+                    extract_asset(mutable_path, digest)
+
+        destination = self.root / "cache" / "extracted" / digest
+        self.assertFalse(destination.exists())
+
+    def test_extract_asset_translates_archive_read_failure(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._extract_validated_members",
+                side_effect=BadZipFile("archive changed"),
+            ):
+                with self.assertRaisesRegex(LockError, "could not extract verified asset"):
+                    extract_asset(archive_path, digest)
+
+    def test_extract_asset_translates_invalid_archive_filename_encoding(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        decode_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch("pysuture.cache.ZipFile", side_effect=decode_error):
+                with self.assertRaisesRegex(LockError, "could not validate asset archive"):
+                    extract_asset(archive_path, digest)
+
+    def test_extract_asset_translates_compression_failure(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._archive_tree_manifest",
+                side_effect=zlib.error("corrupt compressed stream"),
+            ):
+                with self.assertRaisesRegex(LockError, "could not validate asset archive"):
+                    extract_asset(archive_path, digest)
+
+    def test_extract_asset_serializes_concurrent_initialization(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                extracted = list(executor.map(lambda _index: extract_asset(archive_path, digest), range(4)))
+        self.assertTrue(all(path == extracted[0] for path in extracted))
+        self.assertEqual((extracted[0] / "payload" / "data.bin").read_bytes(), b"verified")
+
+    def test_extracted_cache_publish_restores_previous_tree_on_failure(self) -> None:
+        workspace = self.root / "workspace"
+        staging = workspace / "payload"
+        destination = self.root / "extracted"
+        staging.mkdir(parents=True)
+        destination.mkdir()
+        (staging / "new.txt").write_text("new", encoding="utf-8")
+        (destination / "old.txt").write_text("old", encoding="utf-8")
+        original_replace = Path.replace
+
+        def replace_with_failure(source: Path, target: Path) -> Path:
+            if source == staging:
+                raise OSError("injected publish failure")
+            return original_replace(source, target)
+
+        with mock.patch.object(Path, "replace", autospec=True, side_effect=replace_with_failure):
+            with self.assertRaisesRegex(LockError, "could not publish extracted cache"):
+                _publish_extracted_cache(staging, destination, workspace)
+
+        self.assertEqual((destination / "old.txt").read_text(encoding="utf-8"), "old")
+        self.assertFalse((destination / "new.txt").exists())
 
     def test_cython_generates_unique_init_and_launcher_has_no_generic_entry(self) -> None:
         self._write_project("if __name__ == '__main__':\n    print('ok')\n")
