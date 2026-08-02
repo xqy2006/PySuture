@@ -208,11 +208,15 @@ def command_build(args: argparse.Namespace) -> int:
 
 
 def command_doctor(args: argparse.Namespace) -> int:
+    path = lock_path(args.root)
+    lock_error = None
     try:
         lock = load_lock(args.root)
-    except LockError:
+    except LockError as exc:
         lock = None
-    report = doctor_report(lock)
+        if path.exists():
+            lock_error = str(exc)
+    report = doctor_report(lock, lock_error=lock_error)
     if args.json:
         _json(report)
     else:

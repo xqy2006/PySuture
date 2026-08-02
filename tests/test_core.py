@@ -504,6 +504,82 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
             validate_locked_toolchain(expected, toolchain)
 
+    def test_doctor_distinguishes_missing_and_malformed_lock(self) -> None:
+        toolchain = MSVCToolchain(
+            installation_path=self.root / "vs",
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version="17.0",
+            vscmd_version="17.14.19",
+            vc_tools_version="14.44.35207",
+            windows_sdk_version="10.0.26100.0\\",
+        )
+
+        with (
+            mock.patch("pysuture.toolchain.discover_msvc", return_value=toolchain),
+            mock.patch("pysuture.toolchain.cache_root", return_value=self.root / "cache"),
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = cli_main(["doctor", "--root", str(self.root), "--json"])
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(result, 0)
+            self.assertEqual(report["status"], "passed")
+            self.assertEqual(
+                next(check for check in report["checks"] if check["name"] == "lock")["status"],
+                "skipped",
+            )
+
+            (self.root / "pysuture.lock").write_text("{broken", encoding="utf-8")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = cli_main(["doctor", "--root", str(self.root), "--json"])
+            report = json.loads(stdout.getvalue())
+            lock_check = next(check for check in report["checks"] if check["name"] == "lock")
+            self.assertEqual(result, 1)
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(lock_check["status"], "failed")
+            self.assertIn("could not read", lock_check["detail"])
+
+    def test_doctor_rejects_invalid_locked_asset_records(self) -> None:
+        self._write_project("pass\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+        payload["runtime"]["sha256"] = 123
+        write_lock(self.root, payload)
+        toolchain = MSVCToolchain(
+            installation_path=self.root / "vs",
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version=None,
+            vscmd_version=None,
+            vc_tools_version=None,
+            windows_sdk_version="10.0.26100.0\\",
+        )
+
+        with (
+            mock.patch("pysuture.toolchain.discover_msvc", return_value=toolchain),
+            mock.patch("pysuture.toolchain.cache_root", return_value=self.root / "cache"),
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = cli_main(["doctor", "--root", str(self.root), "--json"])
+
+        report = json.loads(stdout.getvalue())
+        lock_check = next(check for check in report["checks"] if check["name"] == "lock")
+        self.assertEqual(result, 1)
+        self.assertEqual(lock_check["status"], "failed")
+        self.assertIn("invalid locked SHA-256", lock_check["detail"])
+
     def test_pack_composition_rejects_link_time_table_collisions(self) -> None:
         runtime = {
             "frozen_module_names": ["json"],

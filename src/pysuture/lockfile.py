@@ -145,8 +145,14 @@ def validate_lock_for_configuration(lock: dict, config: ProjectConfig) -> None:
 
 
 def iter_locked_assets(lock: dict):
-    yield lock["runtime"]
-    yield from lock.get("packs", [])
+    runtime = lock.get("runtime")
+    if not isinstance(runtime, dict):
+        raise LockError("pysuture.lock runtime must be an object")
+    packs = lock.get("packs")
+    if not isinstance(packs, list):
+        raise LockError("pysuture.lock packs must be an array")
+    yield runtime
+    yield from packs
 
 
 def validate_asset_records(lock: dict) -> None:
@@ -157,7 +163,14 @@ def validate_asset_records(lock: dict) -> None:
         for field in ("name", "version", "filename", "url", "sha256", "size"):
             if field not in asset:
                 raise LockError(f"lock asset record is missing {field!r}")
-        digest = str(asset["sha256"]).lower()
+        for field in ("name", "version", "filename", "url"):
+            if not isinstance(asset[field], str) or not asset[field].strip():
+                raise LockError(f"lock asset record has invalid {field!r}")
+        if not isinstance(asset["size"], int) or isinstance(asset["size"], bool) or asset["size"] < 0:
+            raise LockError(f"lock asset record has invalid 'size' for {asset['name']}")
+        if not isinstance(asset["sha256"], str):
+            raise LockError(f"invalid locked SHA-256 for {asset['name']}")
+        digest = asset["sha256"].lower()
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
             raise LockError(f"invalid locked SHA-256 for {asset['name']}")
         identity = f"{asset['name']}=={asset['version']}"
