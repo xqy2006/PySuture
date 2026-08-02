@@ -71,7 +71,9 @@ Windows-safe filename stem (without `.exe`). `pysuture init` parses an existing
 - `pysuture lock` creates `pysuture.lock` from PySuture's reviewed runtime
   catalog, which points to an immutable, hash-pinned StaticPython index only
   after all five Python targets pass the PySuture E2E matrix. An existing lock
-  is reused; only `lock --update` changes the runtime or packages.
+  is reused only when its packages are the exact closure of current imports,
+  explicitly requested packs, and their transitive dependencies. Only
+  `lock --update` changes the runtime or packages.
 - `pysuture build` Cythonizes, compiles, links, and audits the executable.
   `--offline` forbids downloads and `--frozen-lock` additionally rejects project
   source drift, making it suitable for CI.

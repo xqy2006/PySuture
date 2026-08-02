@@ -34,7 +34,7 @@ from pysuture.cache import (
     sha256_bytes,
     sha256_file,
 )
-from pysuture.cli import main as cli_main
+from pysuture.cli import _validate_locked_imports, main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import cythonize_modules, installed_cython_version
 from pysuture.errors import AnalysisError, BuildError, ConfigurationError, LockError
@@ -793,6 +793,64 @@ class CoreTests(unittest.TestCase):
             )
         self.assertEqual(result, 2)
         self.assertIn("run 'pysuture lock --update'", stderr.getvalue())
+
+    def test_existing_lock_rejects_packs_no_longer_reachable_from_imports(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+        _validate_locked_imports(payload, report, config)
+
+        (self.root / "app.py").write_text("pass\n", encoding="utf-8")
+        changed = analyze_project(config)
+        with self.assertRaisesRegex(LockError, "no longer required.*attrs.*--update"):
+            _validate_locked_imports(payload, changed, config)
+
+        write_lock(self.root, payload)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cli_main(["lock", "--root", str(self.root), "--offline"])
+        self.assertEqual(result, 2)
+        self.assertIn("no longer required", stderr.getvalue())
+
+        explicitly_requested = replace(config, packages={"attrs": ""})
+        _validate_locked_imports(payload, changed, explicitly_requested)
+
+    def test_locked_pack_minimality_follows_transitive_dependencies(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+        attrs = payload["packs"][0]
+        helper = {
+            **attrs,
+            "name": "helper",
+            "version": "1.0",
+            "top_level_import_names": ["helper"],
+            "dependencies": [],
+        }
+        attrs["dependencies"] = ["helper"]
+        payload["packs"].append(helper)
+        _validate_locked_imports(payload, report, config)
+
+        attrs["dependencies"] = []
+        with self.assertRaisesRegex(LockError, "no longer required.*helper"):
+            _validate_locked_imports(payload, report, config)
+
+    def test_locked_import_provider_must_be_unambiguous(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+        duplicate_provider = {
+            **payload["packs"][0],
+            "name": "attrs-alternative",
+            "version": "1.0",
+            "dependencies": [],
+        }
+        payload["packs"].append(duplicate_provider)
+        with self.assertRaisesRegex(LockError, "multiple providers.*attrs"):
+            _validate_locked_imports(payload, report, config)
 
     def test_frozen_build_requires_preexisting_lock(self) -> None:
         self._write_project("pass\n")

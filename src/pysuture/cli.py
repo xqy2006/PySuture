@@ -156,23 +156,102 @@ def command_lock(args: argparse.Namespace) -> int:
 
 
 def _validate_locked_imports(lock: dict, report: AnalysisReport, config: ProjectConfig) -> None:
-    provided = {
-        import_name
-        for pack in lock.get("packs", [])
-        for import_name in pack.get("top_level_import_names", [])
-    }
     from .resolver import _is_stdlib
 
-    missing = [
-        name for name in report.external_imports
-        if not _is_stdlib(name, lock.get("runtime", {}))
-        and name not in provided
-        and name not in config.include_packages
-    ]
+    pack_records = lock.get("packs")
+    if not isinstance(pack_records, list):
+        raise LockError("pysuture.lock packs must be an array")
+    by_name: dict[str, dict] = {}
+    providers: dict[str, set[str]] = {}
+    for record in pack_records:
+        if not isinstance(record, dict):
+            raise LockError("pysuture.lock contains an invalid pack record")
+        pack_name = record.get("name")
+        if not isinstance(pack_name, str) or not pack_name:
+            raise LockError("pysuture.lock contains a pack without a valid name")
+        key = pack_name.casefold()
+        if key in by_name:
+            raise LockError(f"pysuture.lock contains duplicate pack records for {pack_name!r}")
+        by_name[key] = record
+        import_names = record.get("top_level_import_names")
+        if not isinstance(import_names, list) or not all(
+            isinstance(name, str) and name for name in import_names
+        ):
+            raise LockError(f"pysuture.lock pack {pack_name} has invalid top-level import names")
+        for import_name in import_names:
+            providers.setdefault(import_name, set()).add(key)
+
+    required = {
+        requested_name.casefold()
+        for requested_name in config.packages
+    }
+    absent_requested = sorted(
+        requested_name
+        for requested_name in config.packages
+        if requested_name.casefold() not in by_name
+    )
+    if absent_requested:
+        raise LockError(
+            "pysuture.lock does not contain explicitly requested pack(s): "
+            + ", ".join(absent_requested)
+            + "; run 'pysuture lock --update'"
+        )
+
+    missing: list[str] = []
+    ambiguous: list[str] = []
+    for name in report.external_imports:
+        if _is_stdlib(name, lock.get("runtime", {})) or name in config.include_packages:
+            continue
+        matches = providers.get(name, set())
+        if not matches:
+            missing.append(name)
+        elif len(matches) > 1:
+            owners = ", ".join(sorted(str(by_name[key]["name"]) for key in matches))
+            ambiguous.append(f"{name} ({owners})")
+        else:
+            required.update(matches)
     if missing:
         raise LockError(
             "current sources import dependencies absent from pysuture.lock: "
             + ", ".join(sorted(missing))
+            + "; run 'pysuture lock --update'"
+        )
+    if ambiguous:
+        raise LockError(
+            "current imports have multiple providers in pysuture.lock: "
+            + ", ".join(sorted(ambiguous))
+            + "; run 'pysuture lock --update'"
+        )
+
+    pending = list(required)
+    while pending:
+        key = pending.pop()
+        record = by_name[key]
+        dependencies = record.get("dependencies")
+        if not isinstance(dependencies, list) or not all(
+            isinstance(name, str) and name for name in dependencies
+        ):
+            raise LockError(f"pysuture.lock pack {record['name']} has invalid dependencies")
+        for dependency in dependencies:
+            dependency_key = dependency.casefold()
+            if dependency_key not in by_name:
+                raise LockError(
+                    f"pysuture.lock pack {record['name']} requires missing pack {dependency!r}; "
+                    "run 'pysuture lock --update'"
+                )
+            if dependency_key not in required:
+                required.add(dependency_key)
+                pending.append(dependency_key)
+
+    extra = sorted(
+        str(record["name"])
+        for key, record in by_name.items()
+        if key not in required
+    )
+    if extra:
+        raise LockError(
+            "pysuture.lock contains packs no longer required by current imports: "
+            + ", ".join(extra)
             + "; run 'pysuture lock --update'"
         )
 
