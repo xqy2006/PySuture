@@ -30,6 +30,7 @@ from pysuture.builder import (
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
+    _github_api_headers,
     _latest_prerelease_asset_url,
     _publish_extracted_cache,
     _safe_extract,
@@ -124,6 +125,14 @@ class CoreTests(unittest.TestCase):
             _latest_prerelease_asset_url(releases, "runtime-index.v1.json"),
             "https://example.invalid/new-index.json",
         )
+
+    def test_github_api_headers_use_actions_token(self) -> None:
+        with mock.patch.dict(os.environ, {"GITHUB_TOKEN": " actions-token "}, clear=True):
+            self.assertEqual(_github_api_headers()["Authorization"], "Bearer actions-token")
+
+    def test_github_api_headers_remain_public_without_token(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn("Authorization", _github_api_headers())
 
     def _write_project(self, app_source: str, *, index: dict | None = None) -> None:
         (self.root / "app.py").write_text(app_source, encoding="utf-8")
