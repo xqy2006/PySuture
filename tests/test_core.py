@@ -1147,6 +1147,22 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(unit.init_symbol.startswith("PyInit_pysuture_") for unit in units))
         self.assertTrue(all("CYTHON_NO_PYINIT_EXPORT=1" in unit.compile_definitions for unit in units))
         self.assertEqual(sum(unit.module.is_package for unit in units), 2)
+        package_units = [unit for unit in units if unit.module.is_package]
+        alias_targets: list[str] = []
+        for unit in package_units:
+            generated_text = unit.c_source.read_text(encoding="utf-8", errors="replace")
+            self.assertIn("PyInit___init__", generated_text)
+            alias_definitions = [
+                definition
+                for definition in unit.compile_definitions
+                if definition.startswith("PyInit___init__=")
+            ]
+            self.assertEqual(len(alias_definitions), 1)
+            alias_targets.append(alias_definitions[0].split("=", 1)[1])
+        self.assertEqual(len(alias_targets), len(set(alias_targets)))
+        self.assertTrue(
+            all(target.startswith("PyInit_pysuture_alias_") for target in alias_targets)
+        )
         launcher = write_launcher(
             self.root / ".pysuture" / "test" / "launcher.c",
             units=units,

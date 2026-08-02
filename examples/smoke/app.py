@@ -12,6 +12,8 @@ import attrs
 import regex
 import regular_pkg
 from regular_pkg import package_value
+import sibling_pkg
+from sibling_pkg import sibling_value
 
 
 @attrs.define(frozen=True)
@@ -63,6 +65,10 @@ def self_test() -> int:
         or regular_pkg.__spec__ is None
         or regular_pkg.__spec__.submodule_search_locations is not regular_pkg.__path__
         or package_value() != "package-ok"
+        or list(sibling_pkg.__path__) != []
+        or sibling_pkg.__spec__ is None
+        or sibling_pkg.__spec__.submodule_search_locations is not sibling_pkg.__path__
+        or sibling_value() != "sibling-ok"
     ):
         return 18
     try:
