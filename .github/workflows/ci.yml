@@ -1,42 +1,105 @@
-name: PySuture CI
+name: Verify StaticPython fbe500b candidate
 
 on:
-  push:
-    branches: [master]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  tests:
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          allow-prereleases: true
-      - name: Install locked build frontend
-        run: python -m pip install -e ".[build,test]"
-      - name: Compile Python sources
-        run: python -m compileall -q src tests scripts
-      - name: Unit tests
-        run: python -m pytest
-      - name: CLI smoke
-        run: pysuture --help
-
-  windows-toolchain:
+  candidate:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -e ".[build]"
-      - name: Verify VS 2022 and Windows SDK discovery
-        run: pysuture doctor --json
+      - name: Download exact verified candidate
+        shell: pwsh
+        run: |
+          python -m pip install -e .
+          @'
+          import json
+          from pathlib import Path
+          from pysuture.cache import fetch_index
+
+          expected = "fbe500baa30232f4dbd95f7200dcb80e109eae83"
+          payload, _ = fetch_index("github+latest://xqy2006/StaticPython/runtime-index.v1.json")
+          index = json.loads(payload)
+          if index.get("staticpython_commit") != expected:
+              raise RuntimeError("latest verified index does not match the audited StaticPython commit")
+          if index.get("status") != "verified":
+              raise RuntimeError("StaticPython candidate is not verified")
+          Path("candidate-index.json").write_bytes(payload)
+          '@ | python -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-fbe500b-candidate-index
+          path: candidate-index.json
+          if-no-files-found: error
+
+  e2e:
+    needs: candidate
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        mode: [console, windowed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-fbe500b-candidate-index
+          path: candidate
+      - name: Install build frontend
+        run: python -m pip install -e ".[build]"
+      - name: Configure exact candidate
+        shell: pwsh
+        run: Copy-Item .\candidate\candidate-index.json .\examples\smoke\runtime-index.v1.json
+      - name: Build locked executable
+        shell: pwsh
+        run: |
+          Push-Location .\examples\smoke
+          pysuture lock --update --python "${{ matrix.python }}"
+          pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
+          Pop-Location
+      - name: Console Unicode, resource, argv, and multiprocessing smoke
+        if: matrix.mode == 'console'
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
+          if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "runtime created or extracted files" }
+      - name: Windowed startup smoke
+        if: matrix.mode == 'windowed'
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}-windowed"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-windowed.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-windowed.exe" $exe
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          $process = Start-Process $exe -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
