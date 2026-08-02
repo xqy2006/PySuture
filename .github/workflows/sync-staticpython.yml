@@ -107,14 +107,19 @@ jobs:
         run: |
           $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}"
           New-Item -ItemType Directory -Force $work | Out-Null
-          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-console.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $exe
+          $decoy = Join-Path $work "regular_pkg"
+          New-Item -ItemType Directory -Force $decoy | Out-Null
+          Set-Content -Path (Join-Path $decoy "injected.py") -Value "raise RuntimeError('external module loaded')" -Encoding utf8
           $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $env:TEMP = $work
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          Set-Location $work
+          Push-Location $work
+          try {
           & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
           if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
           $env:PYSUTURE_SMOKE_ARGV_PROBE = "1"
@@ -176,6 +181,10 @@ jobs:
             throw "exact resource tracker signature reached the application: $trackerOutput"
           }
           Remove-Item Env:PYSUTURE_SMOKE_ARGV_PROBE
+          }
+          finally {
+            Pop-Location
+          }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "runtime created or extracted files" }
       - name: Windowed Unicode, resource, argv, and multiprocessing smoke

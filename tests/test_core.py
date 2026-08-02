@@ -1138,11 +1138,12 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((destination / "new.txt").exists())
 
     def test_cython_generates_unique_init_and_launcher_has_no_generic_entry(self) -> None:
-        self._write_project("if __name__ == '__main__':\n    print('ok')\n")
+        self._write_project("import pkg\nif __name__ == '__main__':\n    print('ok')\n")
         config = load_project_config(self.root)
         report = analyze_project(config)
         units, warnings = cythonize_modules(report, self.root / ".pysuture" / "test", installed_cython_version())
         self.assertTrue(all(unit.init_symbol.startswith("PyInit_pysuture_") for unit in units))
+        self.assertTrue(all("CYTHON_NO_PYINIT_EXPORT=1" in unit.compile_definitions for unit in units))
         launcher = write_launcher(
             self.root / ".pysuture" / "test" / "launcher.c",
             units=units,
@@ -1179,6 +1180,11 @@ class CoreTests(unittest.TestCase):
         prepared = next(unit.prepared_source for unit in units if unit.module.name == "app")
         prepared_text = prepared.read_text(encoding="utf-8")
         self.assertIn("freeze_support", prepared_text)
+        package_prepared = next(unit.prepared_source for unit in units if unit.module.name == "pkg")
+        package_text = package_prepared.read_text(encoding="utf-8")
+        self.assertIn("__path__ = []", package_text)
+        self.assertIn("__spec__.submodule_search_locations = __path__", package_text)
+        self.assertNotIn("__path__ = [__name__]", package_text)
 
     def test_freeze_support_is_prepended_before_guard_work(self) -> None:
         tree = ast.parse(
