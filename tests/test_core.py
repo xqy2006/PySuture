@@ -1006,6 +1006,7 @@ class CoreTests(unittest.TestCase):
         source.unlink()
         with self.assertRaisesRegex(BuildError, "could not reread collected resource"):
             write_resource_sources([record], self.root / "generated")
+
     def test_secret_resource_variants_and_private_key_content_are_rejected(self) -> None:
         self._write_project("pass\n")
         cases = {
@@ -1013,6 +1014,7 @@ class CoreTests(unittest.TestCase):
             "client_secret-production.json": '{"client_secret": "secret"}\n',
             "id_ed25519.backup": "private material\n",
             "renamed-config.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+            "late-key.txt": "x" * (128 * 1024) + "-----BEGIN PRIVATE KEY-----\nsecret\n",
         }
         for name, payload in cases.items():
             with self.subTest(name=name):
@@ -1040,6 +1042,25 @@ class CoreTests(unittest.TestCase):
             replace(base, secret_policy="allow")
         )
         self.assertEqual(allowed_warnings, [])
+
+    def test_application_resource_read_failure_is_reported_as_build_error(self) -> None:
+        self._write_project("pass\n")
+        source = self.root / "payload.txt"
+        source.write_text("payload\n", encoding="utf-8")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("payload.txt", "assets/payload.txt"),),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def fail_target(path: Path) -> bytes:
+            if path.resolve() == source.resolve():
+                raise OSError("injected read failure")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=fail_target):
+            with self.assertRaisesRegex(BuildError, "could not read matched resource"):
+                collect_application_resources(config)
 
     def test_zip_extraction_rejects_parent_traversal(self) -> None:
         archive_path = self.root / "unsafe.zip"
