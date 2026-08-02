@@ -178,6 +178,7 @@ def _compile_source(
         "/Brepro",
         "/experimental:deterministic",
         "/Z7",
+        "/ZH:SHA_256",
         f"/pathmap:{source.parent}=.pysuture/source",
         f"/pathmap:{project_root}=.",
         f"/pathmap:{build_dir}=.pysuture/build",
