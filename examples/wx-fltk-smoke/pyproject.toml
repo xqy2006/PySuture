@@ -1,0 +1,19 @@
+[project]
+name = "pysuture-wx-fltk-smoke-app"
+version = "0.0.0"
+
+[tool.pysuture]
+entry = "app.py"
+python = "3.13"
+mode = "console"
+output = "wx-fltk-smoke"
+include-modules = []
+include-packages = []
+source-roots = ["."]
+index-url = "runtime-index.v1.json"
+secret-policy = "error"
+data = []
+
+[tool.pysuture.packages]
+pyfltk = ""
+wxpython = "==4.2.5"
