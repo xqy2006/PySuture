@@ -22,8 +22,17 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pysuture.analyzer import _private_package_modules, analyze_project
-from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES, materialize_assets
+from pysuture.analyzer import (
+    AnalysisReport,
+    ModuleRecord,
+    _private_package_modules,
+    analyze_project,
+)
+from pysuture.builder import (
+    REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _compile_source,
+    materialize_assets,
+)
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
@@ -521,6 +530,65 @@ class CoreTests(unittest.TestCase):
         expected["vc_tools_version"] = "14.43.34808"
         with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
             validate_locked_toolchain(expected, toolchain)
+
+    def test_msvc_compile_uses_reproducible_relative_inputs_without_ltcg(self) -> None:
+        project_root = self.root / "project"
+        build_dir = project_root / ".pysuture" / "build" / "stable-id"
+        source = project_root / "src" / "probe.c"
+        object_path = build_dir / "obj" / "probe.obj"
+        response_path = build_dir / "rsp" / "probe.rsp"
+        include_dir = self.root / "sdk" / "include"
+        source.parent.mkdir(parents=True)
+        object_path.parent.mkdir(parents=True)
+        include_dir.mkdir(parents=True)
+        source.write_text("int probe(void) { return 0; }\n", encoding="utf-8", newline="\n")
+        toolchain = MSVCToolchain(
+            installation_path=self.root,
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version="17.0",
+            vscmd_version="17.0",
+            vc_tools_version="14.40",
+            windows_sdk_version="10.0",
+        )
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            object_path.write_bytes(b"object")
+            return ""
+
+        with mock.patch("pysuture.builder._run", side_effect=fake_run):
+            _compile_source(
+                toolchain,
+                source,
+                object_path,
+                response_path,
+                [include_dir],
+                (),
+                project_root,
+                build_dir,
+            )
+
+        arguments = response_path.read_text(encoding="utf-16").splitlines()
+        self.assertIn("/Brepro", arguments)
+        self.assertIn("/experimental:deterministic", arguments)
+        self.assertIn("/Z7", arguments)
+        self.assertNotIn("/GL", arguments)
+        self.assertTrue(any(item.startswith(f"/pathmap:{include_dir}=") for item in arguments))
+        source_argument = next(item for item in arguments if item.endswith("probe.c"))
+        object_argument = next(item.removeprefix("/Fo") for item in arguments if item.startswith("/Fo"))
+        include_argument = next(item.removeprefix("/I") for item in arguments if item.startswith("/I"))
+        self.assertFalse(Path(source_argument).is_absolute())
+        self.assertFalse(Path(object_argument).is_absolute())
+        self.assertFalse(Path(include_argument).is_absolute())
+        self.assertEqual(captured["cwd"], build_dir)
+        self.assertFalse(Path(captured["command"][1].removeprefix("@")).is_absolute())
 
     def test_doctor_distinguishes_missing_and_malformed_lock(self) -> None:
         toolchain = MSVCToolchain(
@@ -1625,6 +1693,32 @@ class CoreTests(unittest.TestCase):
         length = len(guard.body)
         _ensure_freeze_support_prelude(guard)
         self.assertEqual(len(guard.body), length)
+    def test_cython_output_is_independent_of_project_root(self) -> None:
+        generated = []
+        for location in ("first-location", "second-location"):
+            project_root = self.root / location / "project"
+            source_root = project_root / "src"
+            source_root.mkdir(parents=True)
+            source = source_root / "app.py"
+            source.write_text("VALUE = __file__\n", encoding="utf-8", newline="\n")
+            record = ModuleRecord("app", source, False, source_root)
+            report = AnalysisReport(
+                entry_module="app",
+                modules={"app": record},
+                reachable_modules=("app",),
+                namespace_packages=(),
+                import_graph={"app": ()},
+                external_imports=(),
+                dynamic_imports=(),
+                dynamic_gaps=(),
+            )
+            units, _warnings = cythonize_modules(
+                report,
+                project_root / ".pysuture" / "build" / "stable-id",
+                installed_cython_version(),
+            )
+            generated.append(units[0].c_source.read_bytes())
+        self.assertEqual(generated[0], generated[1])
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")

@@ -40,3 +40,5 @@ jobs:
       - run: python -m pip install -e ".[build]"
       - name: Verify VS 2022 and Windows SDK discovery
         run: pysuture doctor --json
+      - name: Verify deterministic MSVC path mapping
+        run: python scripts/check_msvc_determinism.py
