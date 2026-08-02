@@ -1012,6 +1012,7 @@ class CoreTests(unittest.TestCase):
         cases = {
             ".env.production": "TOKEN=secret\n",
             ".envrc": "export TOKEN=secret\n",
+            ".netrc": "machine example.invalid password secret\n",
             "client_secret-production.json": '{"client_secret": "secret"}\n',
             "id_ed25519.backup": "private material\n",
             "secrets.toml": 'token = "secret"\n',
@@ -1028,21 +1029,40 @@ class CoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(BuildError, "credential"):
                     collect_application_resources(config)
 
-    def test_public_ssh_key_name_is_not_treated_as_private(self) -> None:
+    def test_public_keys_and_certificates_are_not_treated_as_private(self) -> None:
         self._write_project("pass\n")
         (self.root / "id_ed25519.pub").write_text(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
             encoding="utf-8",
         )
+        (self.root / "id_ed25519.pub.backup").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        (self.root / "certificate.pem").write_text(
+            "-----BEGIN CERTIFICATE-----\npublic certificate\n-----END CERTIFICATE-----\n",
+            encoding="utf-8",
+        )
         config = replace(
             load_project_config(self.root),
-            data=(DataMapping("id_ed25519.pub", "keys/id_ed25519.pub"),),
+            data=(
+                DataMapping("id_ed25519.pub", "keys/id_ed25519.pub"),
+                DataMapping("id_ed25519.pub.backup", "keys/id_ed25519.pub.backup"),
+                DataMapping("certificate.pem", "certificates/certificate.pem"),
+            ),
         )
 
         records, warnings = collect_application_resources(config)
 
         self.assertEqual(warnings, [])
-        self.assertEqual([record.target for record in records], ["keys/id_ed25519.pub"])
+        self.assertEqual(
+            [record.target for record in records],
+            [
+                "certificates/certificate.pem",
+                "keys/id_ed25519.pub",
+                "keys/id_ed25519.pub.backup",
+            ],
+        )
 
     def test_secret_resource_policy_can_warn_or_allow(self) -> None:
         self._write_project("pass\n")
