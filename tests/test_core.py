@@ -1138,12 +1138,15 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((destination / "new.txt").exists())
 
     def test_cython_generates_unique_init_and_launcher_has_no_generic_entry(self) -> None:
-        self._write_project("import pkg\nif __name__ == '__main__':\n    print('ok')\n")
+        self._write_project("import pkg\nimport other_pkg\nif __name__ == '__main__':\n    print('ok')\n")
+        (self.root / "other_pkg").mkdir()
+        (self.root / "other_pkg" / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
         config = load_project_config(self.root)
         report = analyze_project(config)
         units, warnings = cythonize_modules(report, self.root / ".pysuture" / "test", installed_cython_version())
         self.assertTrue(all(unit.init_symbol.startswith("PyInit_pysuture_") for unit in units))
         self.assertTrue(all("CYTHON_NO_PYINIT_EXPORT=1" in unit.compile_definitions for unit in units))
+        self.assertEqual(sum(unit.module.is_package for unit in units), 2)
         launcher = write_launcher(
             self.root / ".pysuture" / "test" / "launcher.c",
             units=units,
