@@ -36,7 +36,7 @@ from pysuture.cache import (
 from pysuture.cli import main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import cythonize_modules, installed_cython_version
-from pysuture.errors import AnalysisError, BuildError, LockError
+from pysuture.errors import AnalysisError, BuildError, ConfigurationError, LockError
 from pysuture.launcher import write_launcher
 from pysuture.lockfile import (
     validate_lock_for_configuration,
@@ -908,11 +908,114 @@ class CoreTests(unittest.TestCase):
 
     def test_init_preserves_existing_pyproject(self) -> None:
         (self.root / "app.py").write_text("pass\n", encoding="utf-8")
-        (self.root / "pyproject.toml").write_text("[project]\nname='demo'\n", encoding="utf-8")
+        (self.root / "pyproject.toml").write_text(
+            "# [tool.pysuture] in a comment is not configuration\n"
+            "[project]\nname='demo'\n",
+            encoding="utf-8",
+        )
         initialize_project(self.root, "app.py", "3.13", "console", None)
         text = (self.root / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn("[project]", text)
         self.assertIn("[tool.pysuture]", text)
+
+    def test_init_writes_canonical_valid_toml_for_unicode_paths(self) -> None:
+        source = self.root / "源码" / "app.py"
+        source.parent.mkdir()
+        source.write_text("def main():\n    return 0\n", encoding="utf-8")
+        initialize_project(
+            self.root,
+            r"源码\app.py:main",
+            "3.13",
+            "windowed",
+            "桌面应用",
+        )
+        config = load_project_config(self.root)
+        self.assertEqual(config.entry, "源码/app.py:main")
+        self.assertEqual(config.entry_callable, "main")
+        self.assertEqual(config.output, "桌面应用")
+
+    def test_invalid_existing_toml_is_not_modified_by_init(self) -> None:
+        (self.root / "app.py").write_text("pass\n", encoding="utf-8")
+        pyproject = self.root / "pyproject.toml"
+        original = "[project\nname = 'broken'\n"
+        pyproject.write_text(original, encoding="utf-8")
+        with self.assertRaisesRegex(ConfigurationError, "valid UTF-8 TOML"):
+            initialize_project(self.root, "app.py", "3.13", "console", None)
+        self.assertEqual(pyproject.read_text(encoding="utf-8"), original)
+
+    def test_project_configuration_rejects_path_escape_and_source_root_mismatch(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        (self.root / "outside.py").write_text("pass\n", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigurationError, "escapes the project root"):
+            initialize_project(project, "../outside.py", "3.13", "console", None)
+
+        (project / "app.py").write_text("pass\n", encoding="utf-8")
+        (project / "src").mkdir()
+        (project / "pyproject.toml").write_text(
+            "[tool.pysuture]\n"
+            'entry = "app.py"\n'
+            'source-roots = ["src"]\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "not contained"):
+            load_project_config(project)
+
+    def test_project_configuration_rejects_invalid_modules_fields_and_output(self) -> None:
+        (self.root / "app.py").write_text("pass\n", encoding="utf-8")
+        pyproject = self.root / "pyproject.toml"
+        pyproject.write_text(
+            "[tool.pysuture]\n"
+            'entry = "app.py"\n'
+            'include-modules = ["plugins.*"]\n',
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "fully qualified"):
+            load_project_config(self.root)
+
+        pyproject.unlink()
+        for output in ("CON", "nested/app", "demo.exe", "trailing."):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(ConfigurationError, "filename stem|must not end"):
+                    initialize_project(self.root, "app.py", "3.13", "console", output)
+
+        with self.assertRaisesRegex(ConfigurationError, "non-empty filename stem"):
+            initialize_project(self.root, "app.py", "3.13", "console", "")
+
+    def test_build_output_override_uses_the_same_windows_name_validation(self) -> None:
+        self._write_project("pass\n")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cli_main(
+                ["build", "--root", str(self.root), "--output", "NUL", "--offline"]
+            )
+        self.assertEqual(result, 2)
+        self.assertIn("valid Windows filename stem", stderr.getvalue())
+
+    def test_entry_requires_python_file_and_single_identifier_callable(self) -> None:
+        (self.root / "app.txt").write_text("pass\n", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigurationError, "refer to a .py"):
+            initialize_project(self.root, "app.txt", "3.13", "console", None)
+
+        (self.root / "app.py").write_text("pass\n", encoding="utf-8")
+        for entry in ("app.py:", "app.py:factory.create", "app.py:not-valid"):
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(ConfigurationError, "one Python identifier"):
+                    initialize_project(self.root, entry, "3.13", "console", None)
+
+    def test_unknown_config_field_and_non_table_tool_fail_cleanly(self) -> None:
+        (self.root / "app.py").write_text("pass\n", encoding="utf-8")
+        pyproject = self.root / "pyproject.toml"
+        pyproject.write_text(
+            "[tool.pysuture]\nentry = 'app.py'\ninclude-module = ['plugin']\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ConfigurationError, "unknown.*include-module"):
+            load_project_config(self.root)
+
+        pyproject.write_text("tool = 'not-a-table'\n", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigurationError, "tool value is not a table"):
+            load_project_config(self.root)
 
 
 if __name__ == "__main__":

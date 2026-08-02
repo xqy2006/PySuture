@@ -9,7 +9,13 @@ from pathlib import Path
 from . import __version__
 from .analyzer import AnalysisReport, analyze_project
 from .builder import build_executable
-from .config import DataMapping, ProjectConfig, initialize_project, load_project_config
+from .config import (
+    DataMapping,
+    ProjectConfig,
+    initialize_project,
+    load_project_config,
+    validate_output_name,
+)
 from .errors import AnalysisError, BuildError, ConfigurationError, LockError, PySutureError
 from .lockfile import (
     load_lock,
@@ -67,9 +73,12 @@ def _apply_build_overrides(config: ProjectConfig, args: argparse.Namespace) -> P
     include_modules = tuple(dict.fromkeys([*config.include_modules, *args.include_module]))
     include_packages = tuple(dict.fromkeys([*config.include_packages, *args.include_package]))
     data = (*config.data, *args.include_data)
+    output = config.output if args.output is None else args.output
     return replace(
         config,
         python=args.python or config.python,
+        mode=args.mode or config.mode,
+        output=validate_output_name(output),
         include_modules=include_modules,
         include_packages=include_packages,
         data=tuple(data),
@@ -187,8 +196,8 @@ def command_build(args: argparse.Namespace) -> int:
         report,
         lock,
         offline=args.offline,
-        mode=args.mode,
-        output=args.output,
+        mode=config.mode,
+        output=config.output,
     )
     print(f"built {destination}")
     print(f"sha256 {build_report['output_sha256']}")

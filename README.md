@@ -56,6 +56,11 @@ packages containing native extensions are rejected and need a StaticPython
 pack. Data mappings create read-only virtual resources. `.env`, private-key,
 and credential-like files are rejected by default.
 
+Entry files and `source-roots` must be relative paths contained by the project
+root. Module declarations use fully qualified Python names, and `output` is a
+Windows-safe filename stem (without `.exe`). `pysuture init` parses an existing
+`pyproject.toml` before changing it and emits escaped, valid TOML.
+
 ## Commands
 
 - `pysuture init` creates `[tool.pysuture]` without replacing an existing
