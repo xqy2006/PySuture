@@ -25,7 +25,11 @@ from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import cythonize_modules, installed_cython_version
 from pysuture.errors import AnalysisError, BuildError, LockError
 from pysuture.launcher import write_launcher
-from pysuture.lockfile import validate_lock_for_project, write_lock
+from pysuture.lockfile import (
+    validate_lock_for_configuration,
+    validate_lock_for_project,
+    write_lock,
+)
 from pysuture.resolver import (
     _solve_pack_dependencies,
     build_lock_payload,
@@ -500,6 +504,57 @@ class CoreTests(unittest.TestCase):
         changed = analyze_project(config)
         with self.assertRaisesRegex(LockError, "sources differ"):
             validate_lock_for_project(payload, changed, frozen=True)
+
+    def test_existing_lock_rejects_python_and_pack_constraint_drift(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        payload = build_lock_payload(config, report, resolve_assets(config, report))
+
+        validate_lock_for_configuration(
+            payload,
+            replace(config, packages={"attrs": ">=25,<26"}),
+        )
+        with self.assertRaisesRegex(LockError, "targets Python 3.13.*requests 3.14"):
+            validate_lock_for_configuration(payload, replace(config, python="3.14"))
+        with self.assertRaisesRegex(LockError, "does not satisfy.*--update"):
+            validate_lock_for_configuration(
+                payload,
+                replace(config, packages={"attrs": ">=26"}),
+            )
+        with self.assertRaisesRegex(LockError, "does not contain requested pack.*--update"):
+            validate_lock_for_configuration(
+                payload,
+                replace(config, packages={"missing-pack": ""}),
+            )
+        duplicate = dict(payload)
+        duplicate["packs"] = [
+            *payload["packs"],
+            {**payload["packs"][0], "name": payload["packs"][0]["name"].upper()},
+        ]
+        with self.assertRaisesRegex(LockError, "duplicate pack records"):
+            validate_lock_for_configuration(duplicate, config)
+        malformed = dict(payload)
+        malformed["packs"] = None
+        with self.assertRaisesRegex(LockError, "packs must be an array"):
+            validate_lock_for_configuration(malformed, config)
+
+        write_lock(self.root, payload)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cli_main(
+                ["lock", "--root", str(self.root), "--python", "3.14"]
+            )
+        self.assertEqual(result, 2)
+        self.assertIn("run 'pysuture lock --update'", stderr.getvalue())
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cli_main(
+                ["build", "--root", str(self.root), "--python", "3.14", "--offline"]
+            )
+        self.assertEqual(result, 2)
+        self.assertIn("run 'pysuture lock --update'", stderr.getvalue())
 
     def test_frozen_build_requires_preexisting_lock(self) -> None:
         self._write_project("pass\n")
