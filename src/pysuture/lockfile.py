@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
+
 from .analyzer import AnalysisReport
+from .config import ProjectConfig
 from .constants import LOCK_SCHEMA_VERSION, SUPPORTED_PLATFORM
 from .errors import LockError
 
@@ -86,6 +90,51 @@ def validate_lock_for_project(lock: dict, report: AnalysisReport, *, frozen: boo
             + "; ".join(details)
             + ")"
         )
+
+
+def validate_lock_for_configuration(lock: dict, config: ProjectConfig) -> None:
+    locked_python = lock.get("python_series")
+    if locked_python != config.python:
+        raise LockError(
+            f"pysuture.lock targets Python {locked_python}, but the project requests {config.python}; "
+            "run 'pysuture lock --update'"
+        )
+
+    locked_packs: dict[str, tuple[str, str]] = {}
+    for record in lock.get("packs", []):
+        if not isinstance(record, dict):
+            raise LockError("pysuture.lock contains an invalid pack record")
+        name = record.get("name")
+        version = record.get("version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise LockError("pysuture.lock contains a pack without a valid name and version")
+        locked_packs[name.casefold()] = (name, version)
+
+    for requested_name, raw_specifier in config.packages.items():
+        locked = locked_packs.get(requested_name.casefold())
+        if locked is None:
+            raise LockError(
+                f"pysuture.lock does not contain requested pack {requested_name!r}; "
+                "run 'pysuture lock --update'"
+            )
+        locked_name, locked_version = locked
+        try:
+            constraint = SpecifierSet(raw_specifier)
+            parsed_version = Version(locked_version)
+        except InvalidSpecifier as exc:
+            raise LockError(
+                f"invalid version constraint for {requested_name}: {raw_specifier!r}"
+            ) from exc
+        except InvalidVersion as exc:
+            raise LockError(
+                f"pysuture.lock contains invalid version {locked_version!r} for pack {locked_name}"
+            ) from exc
+        if parsed_version not in constraint:
+            rendered = raw_specifier or " (any version)"
+            raise LockError(
+                f"pysuture.lock pins {locked_name}=={locked_version}, which does not satisfy "
+                f"the requested constraint {requested_name}{rendered}; run 'pysuture lock --update'"
+            )
 
 
 def iter_locked_assets(lock: dict):

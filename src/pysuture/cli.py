@@ -11,7 +11,13 @@ from .analyzer import AnalysisReport, analyze_project
 from .builder import build_executable
 from .config import DataMapping, ProjectConfig, initialize_project, load_project_config
 from .errors import AnalysisError, BuildError, ConfigurationError, LockError, PySutureError
-from .lockfile import load_lock, lock_path, validate_lock_for_project, write_lock
+from .lockfile import (
+    load_lock,
+    lock_path,
+    validate_lock_for_configuration,
+    validate_lock_for_project,
+    write_lock,
+)
 from .resolver import build_lock_payload, resolve_assets
 from .toolchain import doctor_report
 
@@ -127,6 +133,7 @@ def command_lock(args: argparse.Namespace) -> int:
     path = lock_path(config.root)
     if path.exists() and not args.update:
         payload = load_lock(config.root)
+        validate_lock_for_configuration(payload, config)
         validate_lock_for_project(payload, report, frozen=False)
         _validate_locked_imports(payload, report, config)
         print(f"lock unchanged: {path}")
@@ -172,11 +179,7 @@ def command_build(args: argparse.Namespace) -> int:
         _path, lock = _create_lock(config, report, offline=args.offline)
     else:
         lock = load_lock(config.root)
-    if lock["python_series"] != config.python:
-        raise LockError(
-            f"build requests Python {config.python}, but pysuture.lock pins {lock['python_series']}; "
-            "run 'pysuture lock --update'"
-        )
+    validate_lock_for_configuration(lock, config)
     validate_lock_for_project(lock, report, frozen=args.frozen_lock)
     _validate_locked_imports(lock, report, config)
     destination, build_report = build_executable(
