@@ -211,6 +211,59 @@ def _expression_text(node: ast.AST) -> str:
         return type(node).__name__
 
 
+def _call_argument(call: ast.Call, position: int, keyword: str) -> ast.expr | None:
+    if len(call.args) > position:
+        return call.args[position]
+    return next(
+        (item.value for item in call.keywords if item.arg == keyword),
+        None,
+    )
+
+
+def _importlib_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
+    module_names = {"importlib"}
+    callable_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    module_names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    callable_names.add(alias.asname or alias.name)
+    return module_names, callable_names
+
+
+def _module_package(record: ModuleRecord) -> str:
+    return record.name if record.is_package else record.name.rpartition(".")[0]
+
+
+def _resolve_importlib_literal(
+    record: ModuleRecord,
+    call: ast.Call,
+    imported: str,
+) -> str | None:
+    if not imported.startswith("."):
+        return imported
+    package_node = _call_argument(call, 1, "package")
+    if isinstance(package_node, ast.Name) and package_node.id == "__package__":
+        package = _module_package(record)
+    elif isinstance(package_node, ast.Constant) and isinstance(package_node.value, str):
+        package = package_node.value
+    else:
+        return None
+    level = len(imported) - len(imported.lstrip("."))
+    package_parts = package.split(".") if package else []
+    if level > len(package_parts):
+        return None
+    base = package_parts[: len(package_parts) - level + 1]
+    suffix = imported[level:]
+    if suffix:
+        base.extend(suffix.split("."))
+    return ".".join(base) or None
+
+
 def _imports_for_module(record: ModuleRecord) -> tuple[set[str], set[str], list[DynamicImportGap]]:
     try:
         source = record.path.read_text(encoding="utf-8")
@@ -220,6 +273,7 @@ def _imports_for_module(record: ModuleRecord) -> tuple[set[str], set[str], list[
     imports: set[str] = set()
     dynamic: set[str] = set()
     gaps: list[DynamicImportGap] = []
+    importlib_module_names, importlib_callable_names = _importlib_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
@@ -232,24 +286,33 @@ def _imports_for_module(record: ModuleRecord) -> tuple[set[str], set[str], list[
             is_import_module = (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "importlib"
+                and node.func.value.id in importlib_module_names
                 and node.func.attr == "import_module"
+            ) or (
+                isinstance(node.func, ast.Name)
+                and node.func.id in importlib_callable_names
             )
             is_dunder_import = isinstance(node.func, ast.Name) and node.func.id == "__import__"
             if not (is_import_module or is_dunder_import):
                 continue
-            argument = node.args[0] if node.args else None
+            argument = _call_argument(node, 0, "name")
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-                dynamic.add(argument.value)
-            else:
-                gaps.append(
-                    DynamicImportGap(
-                        module=record.name,
-                        path=str(record.path),
-                        line=getattr(node, "lineno", 0),
-                        expression=_expression_text(argument) if argument is not None else "<missing>",
-                    )
+                resolved = (
+                    _resolve_importlib_literal(record, node, argument.value)
+                    if is_import_module
+                    else argument.value
                 )
+                if resolved and not resolved.startswith("."):
+                    dynamic.add(resolved)
+                    continue
+            gaps.append(
+                DynamicImportGap(
+                    module=record.name,
+                    path=str(record.path),
+                    line=getattr(node, "lineno", 0),
+                    expression=_expression_text(argument) if argument is not None else "<missing>",
+                )
+            )
     return imports, dynamic, gaps
 
 
