@@ -53,7 +53,9 @@ requests = ">=2.32,<3"
 `include-modules` declares concrete dynamic imports. `include-packages` freezes
 an installed pure-Python dependency into the application-private module set;
 packages containing native extensions are rejected and need a StaticPython
-pack. Data mappings create read-only virtual resources. `.env`, private-key,
+pack. Either declaration also acknowledges non-literal dynamic import sites;
+every concrete target must be listed because PySuture cannot infer values built
+at runtime. Data mappings create read-only virtual resources. `.env`, private-key,
 and credential-like files are rejected by default.
 
 Entry files and `source-roots` must be relative paths contained by the project

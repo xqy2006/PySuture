@@ -34,7 +34,7 @@ from pysuture.cache import (
     sha256_bytes,
     sha256_file,
 )
-from pysuture.cli import _validate_locked_imports, main as cli_main
+from pysuture.cli import _unresolved_dynamic_gaps, _validate_locked_imports, main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import cythonize_modules, installed_cython_version
 from pysuture.errors import AnalysisError, BuildError, ConfigurationError, LockError
@@ -234,9 +234,18 @@ class CoreTests(unittest.TestCase):
 
     def test_dynamic_import_gap_requires_explicit_declaration(self) -> None:
         self._write_project("import importlib\nname = 'pkg.helper'\nimportlib.import_module(name)\n")
-        report = analyze_project(load_project_config(self.root))
+        config = replace(load_project_config(self.root), include_modules=())
+        report = analyze_project(config)
         self.assertEqual(len(report.dynamic_gaps), 1)
         self.assertEqual(report.dynamic_gaps[0].module, "app")
+        self.assertEqual(_unresolved_dynamic_gaps(report, config), report.dynamic_gaps)
+
+    def test_explicit_private_package_covers_dynamic_import_gap(self) -> None:
+        self._write_project("import importlib\nname = 'private_plugins'\nimportlib.import_module(name)\n")
+        config = replace(load_project_config(self.root), include_modules=())
+        report = analyze_project(config)
+        declared = replace(config, include_packages=("private_plugins",))
+        self.assertEqual(_unresolved_dynamic_gaps(report, declared), ())
 
     def test_dynamic_import_aliases_and_relative_literals_are_reachable(self) -> None:
         self._write_project(

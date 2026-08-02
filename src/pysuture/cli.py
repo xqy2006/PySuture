@@ -37,7 +37,8 @@ def _project_root(value: str) -> Path:
 
 
 def _unresolved_dynamic_gaps(report: AnalysisReport, config: ProjectConfig):
-    return () if config.include_modules else report.dynamic_gaps
+    has_explicit_targets = bool(config.include_modules or config.include_packages)
+    return () if has_explicit_targets else report.dynamic_gaps
 
 
 def _require_no_dynamic_gaps(report: AnalysisReport, config: ProjectConfig) -> None:
@@ -51,7 +52,8 @@ def _require_no_dynamic_gaps(report: AnalysisReport, config: ProjectConfig) -> N
     raise AnalysisError(
         "dynamic imports could not be resolved: "
         + ", ".join(previews)
-        + "; declare their concrete modules in tool.pysuture.include-modules"
+        + "; declare concrete modules in tool.pysuture.include-modules or a pure-Python "
+        "package in tool.pysuture.include-packages"
     )
 
 
