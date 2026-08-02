@@ -79,7 +79,8 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
                     suffix = resolved.relative_to(anchor).as_posix()
                 except ValueError as exc:
                     raise BuildError(f"resource {resolved} is outside wildcard anchor {anchor}") from exc
-                target = _safe_target(f"{mapping.target.rstrip('/')}/{suffix}")
+                target_root = mapping.target.rstrip("/\\")
+                target = _safe_target(f"{target_root}/{suffix}")
             else:
                 target_value = mapping.target
                 if target_value.endswith(("/", "\\")):
