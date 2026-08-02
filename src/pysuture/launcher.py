@@ -248,6 +248,8 @@ def write_launcher(
         + "    config.site_import = 1;\n"
         + "    config.module_search_paths_set = 1;\n"
         + "    status = PyWideStringList_Append(&config.module_search_paths, L\"pysuture://embedded\");\n"
+        + "    if (!PyStatus_Exception(status)) status = PyConfig_SetString(&config, &config.stdio_encoding, L\"utf-8\");\n"
+        + "    if (!PyStatus_Exception(status)) status = PyConfig_SetString(&config, &config.stdio_errors, L\"strict\");\n"
         + "    if (!PyStatus_Exception(status)) status = PyConfig_SetArgv(&config, argc, argv);\n"
         + "    if (!PyStatus_Exception(status)) status = PyConfig_SetString(&config, &config.program_name, argv[0]);\n"
         + "    if (!PyStatus_Exception(status)) status = PyConfig_SetString(&config, &config.executable, argv[0]);\n"
