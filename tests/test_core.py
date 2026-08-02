@@ -22,6 +22,7 @@ if str(SRC_ROOT) not in sys.path:
 from pysuture.analyzer import _private_package_modules, analyze_project
 from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
 from pysuture.cache import (
+    _extract_validated_members,
     _latest_prerelease_asset_url,
     _publish_extracted_cache,
     _safe_extract,
@@ -622,6 +623,7 @@ class CoreTests(unittest.TestCase):
             first = extract_asset(archive_path, digest)
             marker = json.loads((first / ".pysuture-extracted.json").read_text(encoding="utf-8"))
             self.assertEqual(marker["manifest_version"], 1)
+            self.assertEqual(marker["directories"], ["sdk", "sdk/include", "sdk/libs"])
             self.assertEqual(
                 [entry["path"] for entry in marker["files"]],
                 ["sdk/include/Python.h", "sdk/libs/python.lib"],
@@ -668,6 +670,27 @@ class CoreTests(unittest.TestCase):
             extract_asset(archive_path, digest)
         self.assertFalse(extra.exists())
 
+    def test_extract_asset_rebuilds_cache_with_extra_empty_directory(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            extra = extracted / "unexpected-empty"
+            extra.mkdir()
+            extract_asset(archive_path, digest)
+        self.assertFalse(extra.exists())
+
+    def test_extract_asset_preserves_explicit_empty_directories(self) -> None:
+        archive_path, digest = self._write_asset_archive(
+            [("empty/", b""), ("payload/data.bin", b"verified")]
+        )
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            extracted = extract_asset(archive_path, digest)
+            marker = json.loads(
+                (extracted / ".pysuture-extracted.json").read_text(encoding="utf-8")
+            )
+        self.assertTrue((extracted / "empty").is_dir())
+        self.assertEqual(marker["directories"], ["empty", "payload"])
+
     def test_extract_asset_rejects_forged_file_manifest(self) -> None:
         archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
         with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
@@ -691,6 +714,32 @@ class CoreTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
             with self.assertRaisesRegex(LockError, "duplicate archive member"):
                 extract_asset(archive_path, digest)
+
+    def test_extract_asset_rejects_archive_mutation_after_initial_hash(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        archive_buffer = io.BytesIO(archive_path.read_bytes())
+        mutable_path = mock.Mock()
+        mutable_path.name = "mutable.zip"
+        mutable_path.open.return_value = archive_buffer
+
+        def extract_then_mutate(archive: ZipFile, destination: Path, members: object) -> None:
+            _extract_validated_members(archive, destination, members)  # type: ignore[arg-type]
+            handle = archive.fp
+            assert isinstance(handle, io.BytesIO)
+            payload = handle.getvalue()
+            handle.seek(0)
+            handle.write(bytes([payload[0] ^ 0xFF]) + payload[1:])
+
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._extract_validated_members",
+                side_effect=extract_then_mutate,
+            ):
+                with self.assertRaisesRegex(LockError, "archive changed during"):
+                    extract_asset(mutable_path, digest)
+
+        destination = self.root / "cache" / "extracted" / digest
+        self.assertFalse(destination.exists())
 
     def test_extract_asset_serializes_concurrent_initialization(self) -> None:
         archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])

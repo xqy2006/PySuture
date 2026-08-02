@@ -244,13 +244,33 @@ def _validated_archive_members(
                 raise LockError(
                     f"archive file conflicts with child path: {parent[0]!r} and {name!r}"
                 )
+    _archive_directories(planned)
     return planned
 
 
-def _archive_file_manifest(
+def _archive_directories(
+    members: list[tuple[ZipInfo, tuple[str, ...], str, bool]],
+) -> list[str]:
+    directories: dict[str, str] = {}
+    for member, parts, _name, is_directory in members:
+        prefix_count = len(parts) if is_directory else len(parts) - 1
+        for length in range(1, prefix_count + 1):
+            directory = "/".join(parts[:length])
+            key = directory.casefold()
+            previous = directories.get(key)
+            if previous is not None and previous != directory:
+                raise LockError(
+                    f"archive directory has ambiguous Windows casing: "
+                    f"{previous!r} and {directory!r} from {member.filename!r}"
+                )
+            directories[key] = directory
+    return sorted(directories.values())
+
+
+def _archive_tree_manifest(
     archive: ZipFile,
     members: list[tuple[ZipInfo, tuple[str, ...], str, bool]],
-) -> list[dict[str, object]]:
+) -> dict[str, object]:
     files: list[dict[str, object]] = []
     for member, _parts, name, is_directory in members:
         if is_directory:
@@ -263,7 +283,10 @@ def _archive_file_manifest(
                 f"expected {member.file_size}, got {size}"
             )
         files.append({"path": name, "size": size, "sha256": digest})
-    return sorted(files, key=lambda item: str(item["path"]))
+    return {
+        "directories": _archive_directories(members),
+        "files": sorted(files, key=lambda item: str(item["path"])),
+    }
 
 
 def _extract_validated_members(
@@ -275,6 +298,7 @@ def _extract_validated_members(
     destination_resolved = destination.resolve()
     for member, parts, _name, is_directory in members:
         if is_directory:
+            destination.joinpath(*parts).mkdir(parents=True, exist_ok=True)
             continue
         target = destination.joinpath(*parts)
         target_resolved = target.resolve()
@@ -289,11 +313,12 @@ def _safe_extract(archive: ZipFile, destination: Path) -> None:
     _extract_validated_members(archive, destination, _validated_archive_members(archive))
 
 
-def _tree_file_manifest(root: Path) -> list[dict[str, object]]:
+def _tree_manifest(root: Path) -> dict[str, object]:
     root_stat = root.stat(follow_symlinks=False)
     if not stat.S_ISDIR(root_stat.st_mode) or _is_reparse_point(root_stat):
         raise LockError(f"extracted cache root is not a regular directory: {root}")
 
+    directories: list[str] = []
     files: list[dict[str, object]] = []
 
     def visit(directory: Path, relative_parts: tuple[str, ...]) -> None:
@@ -308,6 +333,7 @@ def _tree_file_manifest(root: Path) -> list[dict[str, object]]:
             if _is_reparse_point(entry_stat) or stat.S_ISLNK(entry_stat.st_mode):
                 raise LockError(f"extracted cache contains a link or reparse point: {relative}")
             if stat.S_ISDIR(entry_stat.st_mode):
+                directories.append(relative)
                 visit(Path(entry.path), parts)
                 continue
             if not stat.S_ISREG(entry_stat.st_mode):
@@ -320,13 +346,16 @@ def _tree_file_manifest(root: Path) -> list[dict[str, object]]:
             files.append({"path": relative, "size": size, "sha256": digest})
 
     visit(root, ())
-    return sorted(files, key=lambda item: str(item["path"]))
+    return {
+        "directories": sorted(directories),
+        "files": sorted(files, key=lambda item: str(item["path"])),
+    }
 
 
 def _cache_matches_manifest(
     destination: Path,
     asset_sha256: str,
-    files: list[dict[str, object]],
+    tree: dict[str, object],
 ) -> bool:
     marker = destination / _EXTRACTED_MARKER_NAME
     try:
@@ -334,10 +363,11 @@ def _cache_matches_manifest(
         if (
             payload.get("manifest_version") != _EXTRACTED_MANIFEST_VERSION
             or payload.get("asset_sha256") != asset_sha256
-            or payload.get("files") != files
+            or payload.get("directories") != tree["directories"]
+            or payload.get("files") != tree["files"]
         ):
             return False
-        return _tree_file_manifest(destination) == files
+        return _tree_manifest(destination) == tree
     except (LockError, OSError, UnicodeError, json.JSONDecodeError, AttributeError):
         return False
 
@@ -397,16 +427,30 @@ def _open_verified_archive(path: Path, expected_sha256: str):
         try:
             archive = ZipFile(handle)
             members = _validated_archive_members(archive)
-            files = _archive_file_manifest(archive, members)
+            tree = _archive_tree_manifest(archive, members)
         except LockError:
             raise
         except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
             raise LockError(f"could not validate asset archive {path}: {exc}") from exc
-        yield archive, members, files
+        yield handle, archive, members, tree
     finally:
         if archive is not None:
             archive.close()
         handle.close()
+
+
+def _verify_open_archive_sha256(handle: object, expected_sha256: str) -> None:
+    position = handle.tell()  # type: ignore[attr-defined]
+    try:
+        handle.seek(0)  # type: ignore[attr-defined]
+        _size, actual_sha256 = _hash_stream(handle)
+    finally:
+        handle.seek(position)  # type: ignore[attr-defined]
+    if actual_sha256 != expected_sha256:
+        raise LockError(
+            "asset archive changed during manifest generation or extraction: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -445,20 +489,25 @@ def extract_asset(path: Path, sha256: str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     lock_path = destination.parent / f".{expected_sha256}.lock"
     with _extraction_lock(lock_path):
-        with _open_verified_archive(path, expected_sha256) as (archive, members, files):
-            if _cache_matches_manifest(destination, expected_sha256, files):
+        with _open_verified_archive(path, expected_sha256) as (handle, archive, members, tree):
+            if _cache_matches_manifest(destination, expected_sha256, tree):
                 return destination
 
             workspace = Path(tempfile.mkdtemp(prefix="pysuture-extract-", dir=destination.parent))
             staging = workspace / "payload"
             try:
                 _extract_validated_members(archive, staging, members)
-                if _tree_file_manifest(staging) != files:
+                _verify_open_archive_sha256(handle, expected_sha256)
+                verified_tree = _archive_tree_manifest(archive, members)
+                if verified_tree != tree:
+                    raise LockError(f"asset archive contents changed during extraction: {path}")
+                if _tree_manifest(staging) != verified_tree:
                     raise LockError(f"extracted asset contents do not match verified archive {path}")
                 marker_payload = {
                     "asset_name": path.name,
                     "asset_sha256": expected_sha256,
-                    "files": files,
+                    "directories": verified_tree["directories"],
+                    "files": verified_tree["files"],
                     "manifest_version": _EXTRACTED_MANIFEST_VERSION,
                 }
                 (staging / _EXTRACTED_MARKER_NAME).write_text(
