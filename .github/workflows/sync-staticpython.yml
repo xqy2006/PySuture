@@ -7,6 +7,10 @@ on:
     - cron: "19 3 * * *"
   workflow_dispatch:
     inputs:
+      staticpython_commit:
+        description: Exact verified StaticPython commit to validate
+        required: false
+        type: string
       propose_update:
         description: Create the reviewed-catalog PR after E2E (leave disabled when validating a feature branch)
         required: false
@@ -36,7 +40,8 @@ jobs:
           python-version: "3.12"
       - name: Download newest verified prerelease index
         env:
-          EXPECTED_STATICPYTHON_COMMIT: ${{ github.event.client_payload.staticpython_commit }}
+          EXPECTED_STATICPYTHON_COMMIT: ${{ github.event.client_payload.staticpython_commit || inputs.staticpython_commit }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           python -m pip install -e .
