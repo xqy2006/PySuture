@@ -88,63 +88,147 @@ def _strict_freeze_support_prelude() -> list[ast.stmt]:
 import sys as __pysuture_multiprocessing_sys
 from multiprocessing import freeze_support as __pysuture_freeze_support
 
-def __pysuture_decimal_argument(argument, prefix):
+def __pysuture_decimal_argument(argument, prefix, maximum):
     if not argument.startswith(prefix):
         return False
     value = argument[len(prefix):]
     if not value or not value.isascii() or not value.isdecimal():
         return False
-    value = value.lstrip("0") or "0"
-    return len(value) < 20 or (len(value) == 20 and value <= "18446744073709551615")
+    if len(value) > 1 and value[0] == "0":
+        return False
+    return len(value) < len(maximum) or (len(value) == len(maximum) and value <= maximum)
 
 if (
     len(__pysuture_multiprocessing_sys.argv) == 4
     and __pysuture_multiprocessing_sys.argv[1] == "--multiprocessing-fork"
-    and __pysuture_decimal_argument(__pysuture_multiprocessing_sys.argv[2], "parent_pid=")
-    and __pysuture_decimal_argument(__pysuture_multiprocessing_sys.argv[3], "pipe_handle=")
+    and __pysuture_decimal_argument(
+        __pysuture_multiprocessing_sys.argv[2], "parent_pid=", "4294967295"
+    )
+    and __pysuture_decimal_argument(
+        __pysuture_multiprocessing_sys.argv[3], "pipe_handle=", "18446744073709551615"
+    )
 ):
     __pysuture_freeze_support()
 """
     ).body
 
 
-def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
+def _target_names(target: ast.expr) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.List, ast.Tuple)):
+        return {name for item in target.elts for name in _target_names(item)}
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    return set()
+
+
+def _statement_bound_names(statement: ast.stmt) -> set[str]:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, ast.Import):
+        return {alias.asname or alias.name.partition(".")[0] for alias in statement.names}
+    if isinstance(statement, ast.ImportFrom):
+        return {alias.asname or alias.name for alias in statement.names if alias.name != "*"}
+    if isinstance(statement, ast.Assign):
+        return {name for target in statement.targets for name in _target_names(target)}
+    if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
+        return _target_names(statement.target)
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return _target_names(statement.target)
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return {
+            name
+            for item in statement.items
+            if item.optional_vars is not None
+            for name in _target_names(item.optional_vars)
+        }
+    if isinstance(statement, ast.Delete):
+        return {name for target in statement.targets for name in _target_names(target)}
+    return set()
+
+
+def _update_freeze_support_bindings(
+    statement: ast.stmt,
+    direct_names: set[str],
+    module_names: set[str],
+) -> None:
+    bound_names = _statement_bound_names(statement)
+    direct_names.difference_update(bound_names)
+    module_names.difference_update(bound_names)
+    if isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module == "multiprocessing":
+        direct_names.update(
+            alias.asname or alias.name
+            for alias in statement.names
+            if alias.name == "freeze_support"
+        )
+    elif isinstance(statement, ast.Import):
+        module_names.update(
+            alias.asname or "multiprocessing"
+            for alias in statement.names
+            if alias.name == "multiprocessing"
+        )
+
+
+def _freeze_support_bindings(statements: list[ast.stmt]) -> tuple[set[str], set[str]]:
+    direct_names: set[str] = set()
+    module_names: set[str] = set()
+    for statement in statements:
+        _update_freeze_support_bindings(statement, direct_names, module_names)
+    return direct_names, module_names
+
+
+def _is_bound_freeze_support_call(
+    call: ast.Call,
+    direct_names: set[str],
+    module_names: set[str],
+) -> bool:
+    if isinstance(call.func, ast.Name):
+        return call.func.id in direct_names
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "freeze_support"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id in module_names
+    )
+
+
+def _remove_canonical_freeze_support_calls(
+    body: list[ast.stmt],
+    direct_names: set[str],
+    module_names: set[str],
+) -> None:
+    # The generated C launcher dispatches real child signatures before importing
+    # the application. Leaving a canonical call here would let the stdlib parser
+    # consume malformed lookalikes that must instead remain application argv.
+    retained: list[ast.stmt] = []
+    for statement in body:
+        call = _no_argument_call(statement)
+        if call is not None and _is_bound_freeze_support_call(call, direct_names, module_names):
+            continue
+        retained.append(statement)
+        _update_freeze_support_bindings(statement, direct_names, module_names)
+    body[:] = retained
+
+
+def _has_strict_freeze_support_prelude(body: list[ast.stmt]) -> bool:
     strict = _strict_freeze_support_prelude()
-    if len(body) >= len(strict) and all(
+    return len(body) >= len(strict) and all(
         ast.dump(actual, include_attributes=False) == ast.dump(expected, include_attributes=False)
         for actual, expected in zip(body, strict)
-    ):
-        return True
-    if len(body) < 2:
-        return False
-    first = body[0]
-    call = _no_argument_call(body[1])
-    if call is None:
-        return False
-    if isinstance(call.func, ast.Name) and isinstance(first, ast.ImportFrom):
-        return (
-            first.level == 0
-            and first.module == "multiprocessing"
-            and any(
-                alias.name == "freeze_support" and (alias.asname or alias.name) == call.func.id
-                for alias in first.names
-            )
-        )
-    if isinstance(call.func, ast.Attribute) and isinstance(first, ast.Import):
-        return (
-            call.func.attr == "freeze_support"
-            and isinstance(call.func.value, ast.Name)
-            and any(
-                alias.name == "multiprocessing"
-                and (alias.asname or alias.name) == call.func.value.id
-                for alias in first.names
-            )
-        )
-    return False
+    )
 
 
-def _ensure_freeze_support_prelude(guard: ast.If) -> None:
-    if _has_freeze_support_prelude(guard.body):
+def _ensure_freeze_support_prelude(
+    guard: ast.If,
+    *,
+    direct_names: set[str] | None = None,
+    module_names: set[str] | None = None,
+) -> None:
+    direct_bindings = set(direct_names or ())
+    module_bindings = set(module_names or ())
+    _remove_canonical_freeze_support_calls(guard.body, direct_bindings, module_bindings)
+    if _has_strict_freeze_support_prelude(guard.body):
         return
     guard.body[0:0] = _strict_freeze_support_prelude()
 
@@ -156,10 +240,15 @@ def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bo
         raise BuildError(f"could not parse {record.path}: {exc}") from exc
     guard_found = False
     if entry:
-        for statement in tree.body:
+        for index, statement in enumerate(tree.body):
             if isinstance(statement, ast.If) and _is_main_guard(statement.test):
                 guard_found = True
-                _ensure_freeze_support_prelude(statement)
+                direct_names, module_names = _freeze_support_bindings(tree.body[:index])
+                _ensure_freeze_support_prelude(
+                    statement,
+                    direct_names=direct_names,
+                    module_names=module_names,
+                )
                 break
     if record.is_package:
         package_setup: list[ast.stmt] = [

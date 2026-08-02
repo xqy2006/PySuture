@@ -96,6 +96,7 @@ def argv_probe() -> int:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     if "--self-test" in sys.argv:
         raise SystemExit(self_test())
     if os.environ.get("PYSUTURE_SMOKE_ARGV_PROBE") == "1":

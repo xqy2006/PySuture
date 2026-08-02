@@ -39,7 +39,9 @@ from pysuture.cli import _unresolved_dynamic_gaps, _validate_locked_imports, mai
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import (
     _ensure_freeze_support_prelude,
+    _freeze_support_bindings,
     _no_argument_call,
+    _prepare_module_source,
     cythonize_modules,
     installed_cython_version,
 )
@@ -1158,13 +1160,17 @@ class CoreTests(unittest.TestCase):
         self.assertIn("return argc == 4", text)
         self.assertIn('L"parent_pid="', text)
         self.assertIn('L"pipe_handle="', text)
+        self.assertIn("cursor[0] == L'0'", text)
+        self.assertIn('L"parent_pid=", UINT_MAX', text)
+        self.assertIn('L"pipe_handle=", ULLONG_MAX', text)
         self.assertIn("CPython 3.11-3.15", text)
         self.assertIn("argc != 5", text)
         self.assertIn('wcscmp(argv[1], L"-B")', text)
         self.assertIn('wcscmp(argv[2], L"-I")', text)
         self.assertIn('wcscmp(argv[3], L"-c")', text)
         self.assertIn("wcsncmp(argv[4], prefix", text)
-        self.assertIn("LLONG_MAX", text)
+        self.assertIn("number[0] == L'0'", text)
+        self.assertIn("INT_MAX", text)
         self.assertNotIn("_wcstoi64", text)
         self.assertIn("wmain(int argc", text)
         self.assertNotIn("Py_Main(", text)
@@ -1212,15 +1218,17 @@ class CoreTests(unittest.TestCase):
         prepared = compile(tree, "<prepared-entry>", "exec")
         cases = (
             (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=2"], True),
-            (["--multiprocessing-fork", "parent_pid=0001", "pipe_handle=0002"], True),
             (
                 [
                     "--multiprocessing-fork",
-                    "parent_pid=000000000000000000001",
+                    "parent_pid=4294967295",
                     "pipe_handle=18446744073709551615",
                 ],
                 True,
             ),
+            (["--multiprocessing-fork", "parent_pid=4294967296", "pipe_handle=2"], False),
+            (["--multiprocessing-fork", "parent_pid=01", "pipe_handle=2"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=02"], False),
             (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle"], False),
             (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616"], False),
             (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=+1"], False),
@@ -1251,14 +1259,27 @@ class CoreTests(unittest.TestCase):
         guard = tree.body[0]
         self.assertIsInstance(guard, ast.If)
         _ensure_freeze_support_prelude(guard)
-        self.assertEqual(len(guard.body), 3)
-
-    def test_aliased_freeze_support_preludes_are_not_duplicated(self) -> None:
-        sources = (
-            "from multiprocessing import freeze_support as fs\nfs()\nstart_children()\n",
-            "import multiprocessing as mp\nmp.freeze_support()\nstart_children()\n",
+        self.assertEqual(len(guard.body), 6)
+        self.assertFalse(
+            any(
+                isinstance(call.func, ast.Name) and call.func.id == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
         )
-        for source in sources:
+
+    def test_aliased_freeze_support_calls_are_replaced_by_strict_dispatch(self) -> None:
+        sources = (
+            (
+                "from multiprocessing import freeze_support as fs\nfs()\nstart_children()\n",
+                "fs",
+            ),
+            (
+                "import multiprocessing as mp\nmp.freeze_support()\nstart_children()\n",
+                "mp",
+            ),
+        )
+        for source, binding in sources:
             with self.subTest(source=source):
                 guard = ast.If(
                     test=ast.Constant(value=True),
@@ -1266,7 +1287,131 @@ class CoreTests(unittest.TestCase):
                     orelse=[],
                 )
                 _ensure_freeze_support_prelude(guard)
-                self.assertEqual(len(guard.body), 3)
+                self.assertEqual(len(guard.body), 6)
+                remaining_calls = [
+                    call
+                    for statement in guard.body
+                    if (call := _no_argument_call(statement)) is not None
+                ]
+                self.assertFalse(
+                    any(
+                        (isinstance(call.func, ast.Name) and call.func.id == binding)
+                        or (
+                            isinstance(call.func, ast.Attribute)
+                            and isinstance(call.func.value, ast.Name)
+                            and call.func.value.id == binding
+                            and call.func.attr == "freeze_support"
+                        )
+                        for call in remaining_calls
+                    )
+                )
+
+    def test_module_level_freeze_support_is_strictly_routed(self) -> None:
+        sources = (
+            "from multiprocessing import freeze_support\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support()\n"
+            "    start_children()\n",
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    mp.freeze_support()\n"
+            "    start_children()\n",
+        )
+        cases = (
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=2"], True),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle"], False),
+            (["-c", "print('application argument')"], False),
+        )
+        for source in sources:
+            tree = ast.parse(source)
+            guard_index = next(
+                index for index, statement in enumerate(tree.body) if isinstance(statement, ast.If)
+            )
+            guard = tree.body[guard_index]
+            self.assertIsInstance(guard, ast.If)
+            direct_names, module_names = _freeze_support_bindings(tree.body[:guard_index])
+            _ensure_freeze_support_prelude(
+                guard,
+                direct_names=direct_names,
+                module_names=module_names,
+            )
+            ast.fix_missing_locations(tree)
+            prepared = compile(tree, "<canonical-freeze-support>", "exec")
+            for arguments, expected_call in cases:
+                with self.subTest(source=source, arguments=arguments):
+                    start_children = mock.Mock()
+                    with (
+                        mock.patch.object(sys, "argv", ["demo.exe", *arguments]),
+                        mock.patch("multiprocessing.freeze_support") as freeze_support,
+                    ):
+                        exec(
+                            prepared,
+                            {"__name__": "__main__", "start_children": start_children},
+                        )
+                    self.assertEqual(freeze_support.called, expected_call)
+                    start_children.assert_called_once_with()
+
+    def test_entry_preparation_replaces_module_level_freeze_support(self) -> None:
+        self._write_project(
+            "import multiprocessing\n"
+            "if __name__ == '__main__':\n"
+            "    multiprocessing.freeze_support()\n"
+            "    application_started = True\n"
+        )
+        report = analyze_project(load_project_config(self.root))
+        prepared_path, guard_found = _prepare_module_source(
+            report.modules[report.entry_module],
+            self.root / ".pysuture" / "prepared-entry.py",
+            entry=True,
+        )
+        self.assertTrue(guard_found)
+        tree = ast.parse(prepared_path.read_text(encoding="utf-8"))
+        guard = next(statement for statement in tree.body if isinstance(statement, ast.If))
+        self.assertFalse(
+            any(
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "multiprocessing"
+                and call.func.attr == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(statement, ast.If)
+                and any(
+                    (call := _no_argument_call(child)) is not None
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "__pysuture_freeze_support"
+                    for child in statement.body
+                )
+                for statement in guard.body
+            )
+        )
+
+    def test_rebound_freeze_support_name_is_not_removed(self) -> None:
+        tree = ast.parse(
+            "from multiprocessing import freeze_support\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support = application_hook\n"
+            "    freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+        self.assertTrue(
+            any(
+                isinstance(call.func, ast.Name) and call.func.id == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
+        )
 
     def test_unverified_bare_freeze_support_call_gets_canonical_prelude(self) -> None:
         guard = ast.If(
