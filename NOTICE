@@ -1,0 +1,9 @@
+PySuture
+Copyright 2026 xqy2006
+
+PySuture is licensed under the Apache License, Version 2.0.
+
+PySuture consumes immutable SDK and library-pack assets produced by
+StaticPython (https://github.com/xqy2006/StaticPython). CPython and optional
+third-party libraries retain their own licenses and notices. Generated
+distributions must preserve all applicable notices from their lock file.

@@ -1,0 +1,13 @@
+/.pysuture/
+/build/
+/dist/
+/.pytest_cache/
+/.ruff_cache/
+/__pycache__/
+*.py[cod]
+*.obj
+*.pdb
+*.map
+*.exe
+*.egg-info/
+.venv/

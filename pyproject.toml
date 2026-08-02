@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pysuture"
+version = "0.1.0a1"
+description = "Build Cythonized Python applications as non-extracting, statically linked Windows executables"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "xqy2006" }]
+dependencies = [
+  "packaging>=24.2",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.optional-dependencies]
+build = ["Cython==3.2.9"]
+test = ["pytest>=8.3"]
+
+[project.scripts]
+pysuture = "pysuture.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/xqy2006/PySuture"
+Repository = "https://github.com/xqy2006/PySuture"
+StaticPython = "https://github.com/xqy2006/StaticPython"
+Issues = "https://github.com/xqy2006/PySuture/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pysuture"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

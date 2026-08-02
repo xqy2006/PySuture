@@ -1,0 +1,171 @@
+name: Verify and propose StaticPython update
+
+on:
+  repository_dispatch:
+    types: [staticpython-release]
+  schedule:
+    - cron: "19 3 * * *"
+  workflow_dispatch:
+    inputs:
+      propose_update:
+        description: Create the reviewed-catalog PR after E2E (leave disabled when validating a feature branch)
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-staticpython
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: windows-2022
+    outputs:
+      commit: ${{ steps.metadata.outputs.commit }}
+      short_commit: ${{ steps.metadata.outputs.short_commit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download newest verified prerelease index
+        env:
+          EXPECTED_STATICPYTHON_COMMIT: ${{ github.event.client_payload.staticpython_commit }}
+        shell: pwsh
+        run: |
+          python -m pip install -e .
+          @'
+          import json
+          import os
+          from pathlib import Path
+          from pysuture.cache import fetch_index
+          payload, _ = fetch_index("github+latest://xqy2006/StaticPython/runtime-index.v1.json")
+          expected = os.environ.get("EXPECTED_STATICPYTHON_COMMIT", "").strip()
+          if expected and json.loads(payload)["staticpython_commit"] != expected:
+              raise RuntimeError("latest verified index does not match the dispatched StaticPython commit")
+          Path("candidate-index.json").write_bytes(payload)
+          '@ | python -
+      - name: Read candidate metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $index = Get-Content .\candidate-index.json -Raw | ConvertFrom-Json
+          if ($index.status -ne "verified") { throw "candidate is not verified" }
+          "commit=$($index.staticpython_commit)" >> $env:GITHUB_OUTPUT
+          "short_commit=$($index.staticpython_commit.Substring(0, 12))" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate-index.json
+          if-no-files-found: error
+
+  e2e:
+    needs: candidate
+    runs-on: windows-2022
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        mode: [console, windowed]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate
+      - name: Install build frontend
+        run: python -m pip install -e ".[build]"
+      - name: Configure exact candidate
+        shell: pwsh
+        run: |
+          Copy-Item .\candidate\candidate-index.json .\examples\smoke\runtime-index.v1.json
+      - name: Build locked executable
+        shell: pwsh
+        run: |
+          Push-Location .\examples\smoke
+          pysuture lock --update --python "${{ matrix.python }}"
+          pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
+          Pop-Location
+      - name: Console Unicode, resource, argv, and multiprocessing smoke
+        if: matrix.mode == 'console'
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
+          if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "runtime created or extracted files" }
+      - name: Windowed startup smoke
+        if: matrix.mode == 'windowed'
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}-windowed"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-windowed.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-windowed.exe" $exe
+          $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:TEMP = $work
+          $env:TMP = $work
+          Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          $process = Start-Process $exe -ArgumentList @("--quiet") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
+          $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
+          if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
+
+  propose-update:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.propose_update }}
+    needs: [candidate, e2e]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate
+      - name: Update reviewed catalog
+        run: python .\scripts\update_runtime_catalog.py --index .\candidate\candidate-index.json
+      - name: Create update PR without merging
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          if (-not (git status --porcelain)) {
+            Write-Host "Catalog already points at this verified StaticPython commit"
+            exit 0
+          }
+          $branch = "sync/staticpython-${{ needs.candidate.outputs.short_commit }}"
+          $existing = gh pr list --state open --head $branch --json url --jq '.[0].url'
+          if (-not [string]::IsNullOrWhiteSpace($existing)) {
+            Write-Host "An update PR already exists for this verified candidate: $existing"
+            exit 0
+          }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b $branch
+          git add runtime-catalog.lock.json
+          git commit -m "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}"
+          git push origin $branch
+          gh pr create --base master --head $branch --title "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}" --body "All five CPython targets and console/windowed representative applications passed. This PR only updates the reviewed catalog pointer; it does not auto-merge." --draft
