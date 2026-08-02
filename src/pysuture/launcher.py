@@ -58,7 +58,10 @@ def write_launcher(
     descriptor_externs = [f"extern const StaticPythonPackV1 {symbol};" for symbol in pack_symbols]
     selected_packs = ["    &StaticPython_BaseResourcePackV1,", *[f"    &{symbol}," for symbol in pack_symbols], "    &pysuture_application_pack,"]
     namespace_lines = [
-        f"    if (pysuture_install_namespace({_c_string(name)}) < 0) return -1;"
+        "    if (pysuture_install_namespace("
+        + _c_string(name)
+        + ") < 0) { pysuture_show_error(L\"Could not install a namespace package\"); "
+        + "Py_FinalizeEx(); return 124; }"
         for name in namespace_packages
     ]
     callable_literal = "NULL" if entry_callable is None else _c_string(entry_callable)
@@ -154,12 +157,23 @@ def write_launcher(
         + "    if (PyDict_GetItemString(modules, name) != NULL) return 0;\n"
         + "    PyObject *module = PyModule_New(name);\n"
         + "    PyObject *path = PyList_New(0);\n"
-        + "    if (module == NULL || path == NULL) { Py_XDECREF(module); Py_XDECREF(path); return -1; }\n"
-        + "    if (PyModule_AddObjectRef(module, \"__path__\", path) < 0\n"
+        + "    PyObject *machinery = PyImport_ImportModule(\"importlib.machinery\");\n"
+        + "    PyObject *spec_type = machinery != NULL ? PyObject_GetAttrString(machinery, \"ModuleSpec\") : NULL;\n"
+        + "    PyObject *spec = spec_type != NULL ? PyObject_CallFunction(spec_type, \"sO\", name, Py_None) : NULL;\n"
+        + "    if (module == NULL || path == NULL || spec == NULL) {\n"
+        + "        Py_XDECREF(spec); Py_XDECREF(spec_type); Py_XDECREF(machinery);\n"
+        + "        Py_XDECREF(path); Py_XDECREF(module); return -1;\n"
+        + "    }\n"
+        + "    if (PyObject_SetAttrString(spec, \"submodule_search_locations\", path) < 0\n"
+        + "        || PyModule_AddObjectRef(module, \"__path__\", path) < 0\n"
         + "        || PyModule_AddStringConstant(module, \"__package__\", name) < 0\n"
+        + "        || PyModule_AddObjectRef(module, \"__loader__\", Py_None) < 0\n"
+        + "        || PyModule_AddObjectRef(module, \"__spec__\", spec) < 0\n"
         + "        || PyDict_SetItemString(modules, name, module) < 0) {\n"
+        + "        Py_DECREF(spec); Py_DECREF(spec_type); Py_DECREF(machinery);\n"
         + "        Py_DECREF(path); Py_DECREF(module); return -1;\n"
         + "    }\n"
+        + "    Py_DECREF(spec); Py_DECREF(spec_type); Py_DECREF(machinery);\n"
         + "    Py_DECREF(path); Py_DECREF(module); return 0;\n"
         + "}\n\n"
         + "static PyObject *\n"
@@ -287,10 +301,10 @@ def write_launcher(
         + "    PyObject *installed = runtime != NULL ? PyObject_CallMethod(runtime, \"install\", NULL) : NULL;\n"
         + "    Py_XDECREF(installed); Py_XDECREF(runtime);\n"
         + "    if (PyErr_Occurred()) { pysuture_show_error(L\"Could not install embedded resources\"); return 122; }\n"
+        + ("\n".join(namespace_lines) + "\n" if namespace_lines else "")
         + "    int multiprocessing = pysuture_dispatch_multiprocessing(argc, argv);\n"
         + "    if (multiprocessing >= 0) { Py_FinalizeEx(); return multiprocessing; }\n"
         + "    if (multiprocessing == -1) { pysuture_show_error(L\"Multiprocessing child startup failed\"); Py_FinalizeEx(); return 123; }\n"
-        + ("\n".join(namespace_lines) + "\n" if namespace_lines else "")
         + f"    {entry.main_flag} = 1;\n"
         + "    PyObject *modules = PyImport_GetModuleDict();\n"
         + "    if (PyDict_DelItemString(modules, \"__main__\") < 0) PyErr_Clear();\n"

@@ -1173,6 +1173,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("number[0] == L'0'", text)
         self.assertIn("INT_MAX", text)
         self.assertNotIn("_wcstoi64", text)
+        self.assertIn('PyImport_ImportModule("importlib.machinery")', text)
+        self.assertIn('PyModule_AddObjectRef(module, "__spec__", spec)', text)
+        self.assertIn('PyModule_AddObjectRef(module, "__loader__", Py_None)', text)
+        self.assertIn('PyObject_SetAttrString(spec, "submodule_search_locations", path)', text)
+        self.assertLess(
+            text.index('pysuture_install_namespace("ns")'),
+            text.index("pysuture_dispatch_multiprocessing(argc, argv)"),
+        )
         self.assertIn("wmain(int argc", text)
         self.assertNotIn("Py_Main(", text)
         self.assertNotIn("Py_RunMain(", text)
