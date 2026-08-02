@@ -24,6 +24,7 @@ if str(SRC_ROOT) not in sys.path:
 from pysuture.analyzer import _private_package_modules, analyze_project
 from pysuture.builder import (
     REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _classify_main_object_records,
     _resolve_system_libraries,
     materialize_assets,
 )
@@ -92,6 +93,26 @@ class CoreTests(unittest.TestCase):
                 ["GdiPlus.lib"],
             ),
             ["user32.lib", "advapi32.lib"],
+        )
+
+    def test_main_object_audit_allows_only_selected_pack_libraries(self) -> None:
+        allowed, forbidden = _classify_main_object_records(
+            "\n".join(
+                [
+                    "0001:00000000 wxEntry wxbase32u.lib(main.obj)",
+                    "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                    r"0001:00000020 custom_entry C:\build\main.obj",
+                ]
+            ),
+            {"wxbase32u.lib"},
+        )
+        self.assertEqual(allowed, ["0001:00000000 wxEntry wxbase32u.lib(main.obj)"])
+        self.assertEqual(
+            forbidden,
+            [
+                "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                r"0001:00000020 custom_entry C:\build\main.obj",
+            ],
         )
 
     def test_latest_prerelease_asset_uses_publication_time_not_api_order(self) -> None:

@@ -107,6 +107,17 @@ jobs:
           finally {
             Pop-Location
           }
+      - name: Upload failed build map
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-build-${{ matrix.python }}-${{ matrix.mode }}
+          path: |
+            examples/smoke/build/**/*.map
+            examples/smoke/build/**/*.rsp
+            examples/smoke/build/**/build-report.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Console Unicode, resource, argv, and multiprocessing smoke
         if: matrix.mode == 'console'
         shell: pwsh
@@ -213,6 +224,17 @@ jobs:
           finally {
             Pop-Location
           }
+      - name: Upload failed UI link evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-ui-link-${{ matrix.python }}
+          path: |
+            examples/wx-fltk-smoke/build/**/*.map
+            examples/wx-fltk-smoke/build/**/*.rsp
+            examples/wx-fltk-smoke/build/**/build-report.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Run without external runtimes or extraction
         shell: pwsh
         run: |
