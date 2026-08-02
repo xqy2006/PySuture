@@ -39,6 +39,7 @@ from pysuture.cli import _unresolved_dynamic_gaps, _validate_locked_imports, mai
 from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import (
     _ensure_freeze_support_prelude,
+    _no_argument_call,
     cythonize_modules,
     installed_cython_version,
 )
@@ -1157,6 +1158,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("return argc == 4", text)
         self.assertIn('L"parent_pid="', text)
         self.assertIn('L"pipe_handle="', text)
+        self.assertIn("LLONG_MAX", text)
+        self.assertNotIn("_wcstoi64", text)
         self.assertIn("wmain(int argc", text)
         self.assertNotIn("Py_Main(", text)
         self.assertNotIn("Py_RunMain(", text)
@@ -1209,6 +1212,35 @@ class CoreTests(unittest.TestCase):
         self.assertIsInstance(guard, ast.If)
         _ensure_freeze_support_prelude(guard)
         self.assertEqual(len(guard.body), 3)
+
+    def test_aliased_freeze_support_preludes_are_not_duplicated(self) -> None:
+        sources = (
+            "from multiprocessing import freeze_support as fs\nfs()\nstart_children()\n",
+            "import multiprocessing as mp\nmp.freeze_support()\nstart_children()\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                guard = ast.If(
+                    test=ast.Constant(value=True),
+                    body=ast.parse(source).body,
+                    orelse=[],
+                )
+                _ensure_freeze_support_prelude(guard)
+                self.assertEqual(len(guard.body), 3)
+
+    def test_unverified_bare_freeze_support_call_gets_canonical_prelude(self) -> None:
+        guard = ast.If(
+            test=ast.Constant(value=True),
+            body=ast.parse("freeze_support()\nstart_children()\n").body,
+            orelse=[],
+        )
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), 4)
+        self.assertIsInstance(guard.body[0], ast.ImportFrom)
+        call = _no_argument_call(guard.body[1])
+        self.assertIsNotNone(call)
+        self.assertIsInstance(call.func, ast.Name)
+        self.assertEqual(call.func.id, "freeze_support")
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")

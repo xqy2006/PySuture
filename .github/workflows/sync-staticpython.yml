@@ -120,7 +120,11 @@ jobs:
           $probeCases = @(
             [pscustomobject]@{ Args = @("-c", "print('must not run')", "-m", "not.a.module", "argument with spaces") },
             [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle") },
-            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") }
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(-1)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(+1)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") }
           )
           foreach ($probeCase in $probeCases) {
             $probeArgs = [object[]]$probeCase.Args

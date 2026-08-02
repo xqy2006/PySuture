@@ -73,29 +73,22 @@ def _insertion_index(body: list[ast.stmt]) -> int:
     return index
 
 
-def _is_freeze_support_call(statement: ast.stmt) -> bool:
+def _no_argument_call(statement: ast.stmt) -> ast.Call | None:
     if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
-        return False
+        return None
     call = statement.value
     if call.args or call.keywords:
-        return False
-    if isinstance(call.func, ast.Name):
-        return call.func.id == "freeze_support"
-    return (
-        isinstance(call.func, ast.Attribute)
-        and call.func.attr == "freeze_support"
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "multiprocessing"
-    )
+        return None
+    return call
 
 
 def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
-    if body and _is_freeze_support_call(body[0]):
-        return True
-    if len(body) < 2 or not _is_freeze_support_call(body[1]):
+    if len(body) < 2:
         return False
     first = body[0]
-    call = body[1].value
+    call = _no_argument_call(body[1])
+    if call is None:
+        return False
     if isinstance(call.func, ast.Name) and isinstance(first, ast.ImportFrom):
         return (
             first.level == 0
@@ -106,9 +99,14 @@ def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
             )
         )
     if isinstance(call.func, ast.Attribute) and isinstance(first, ast.Import):
-        return any(
-            alias.name == "multiprocessing" and (alias.asname or alias.name) == "multiprocessing"
-            for alias in first.names
+        return (
+            call.func.attr == "freeze_support"
+            and isinstance(call.func.value, ast.Name)
+            and any(
+                alias.name == "multiprocessing"
+                and (alias.asname or alias.name) == call.func.value.id
+                for alias in first.names
+            )
         )
     return False
 
