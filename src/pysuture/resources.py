@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import glob
 import hashlib
-import os
-import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -35,6 +33,12 @@ def _safe_target(value: str) -> str:
     normalized = value.replace("\\", "/")
     parts = normalized.split("/")
     path = PurePosixPath(normalized)
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BuildError(
+            f"resource target must be a safe relative virtual path: {value!r}"
+        ) from exc
     if (
         not normalized
         or path.is_absolute()
@@ -88,7 +92,10 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
                 target = _safe_target(target_value)
             if target in records:
                 raise BuildError(f"multiple resources map to virtual path {target!r}")
-            payload = resolved.read_bytes()
+            try:
+                payload = resolved.read_bytes()
+            except OSError as exc:
+                raise BuildError(f"could not read matched resource: {resolved}") from exc
             records[target] = ResourceRecord(
                 source=resolved,
                 target=target,
@@ -111,9 +118,8 @@ def write_resource_sources(records: list[ResourceRecord], source_dir: Path) -> l
             )
         targets[target] = record.source
 
-    source_dir.mkdir(parents=True, exist_ok=True)
-    generated: list[dict] = []
-    for index, record in enumerate(records, start=1):
+    verified_payloads: list[tuple[ResourceRecord, bytes, str]] = []
+    for record in records:
         try:
             payload = record.source.read_bytes()
         except OSError as exc:
@@ -125,8 +131,15 @@ def write_resource_sources(records: list[ResourceRecord], source_dir: Path) -> l
                 f"(expected {record.size} bytes/{record.sha256.lower()}, "
                 f"got {len(payload)} bytes/{actual_sha256})"
             )
+        verified_payloads.append((record, payload, actual_sha256))
+
+    # Validate every input before emitting the first generated source. A late
+    # mismatch must not leave a plausible-looking partial resource table.
+    source_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[dict] = []
+    for index, (record, payload, actual_sha256) in enumerate(verified_payloads, start=1):
         compressed = zlib.compress(payload, level=9)
-        symbol = f"pysuture_resource_{index:06d}_{record.sha256[:16]}"
+        symbol = f"pysuture_resource_{index:06d}_{actual_sha256[:16]}"
         values = [str(value) for value in compressed]
         rows = ["    " + ", ".join(values[offset : offset + 24]) + "," for offset in range(0, len(values), 24)]
         path = source_dir / f"resource_{index:06d}.c"
@@ -146,7 +159,7 @@ def write_resource_sources(records: list[ResourceRecord], source_dir: Path) -> l
                 "symbol": symbol,
                 "size": len(payload),
                 "compressed_size": len(compressed),
-                "sha256": record.sha256,
+                "sha256": actual_sha256,
             }
         )
     return generated
