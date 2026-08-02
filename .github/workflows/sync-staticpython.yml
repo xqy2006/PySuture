@@ -98,9 +98,15 @@ jobs:
         shell: pwsh
         run: |
           Push-Location .\examples\smoke
-          pysuture lock --update --python "${{ matrix.python }}"
-          pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
-          Pop-Location
+          try {
+            pysuture lock --update --python "${{ matrix.python }}"
+            if ($LASTEXITCODE -ne 0) { throw "pysuture lock failed with $LASTEXITCODE" }
+            pysuture build --python "${{ matrix.python }}" --mode "${{ matrix.mode }}" --output "smoke-${{ matrix.python }}-${{ matrix.mode }}" --frozen-lock
+            if ($LASTEXITCODE -ne 0) { throw "pysuture build failed with $LASTEXITCODE" }
+          }
+          finally {
+            Pop-Location
+          }
       - name: Console Unicode, resource, argv, and multiprocessing smoke
         if: matrix.mode == 'console'
         shell: pwsh
@@ -164,26 +170,49 @@ jobs:
         shell: pwsh
         run: |
           Push-Location .\examples\wx-fltk-smoke
-          pysuture lock --update --python "${{ matrix.python }}"
-          $lock = Get-Content .\pysuture.lock -Raw | ConvertFrom-Json
-          $names = @($lock.packs | ForEach-Object name | Sort-Object)
-          if (($names -join ",") -ne "pyfltk,wxpython") {
-            throw "expected exactly pyfltk and wxpython packs, got: $($names -join ', ')"
+          try {
+            pysuture lock --update --python "${{ matrix.python }}"
+            if ($LASTEXITCODE -ne 0) { throw "pysuture lock failed with $LASTEXITCODE" }
+            $lock = Get-Content .\pysuture.lock -Raw | ConvertFrom-Json
+            $packsByName = @{}
+            foreach ($pack in @($lock.packs)) {
+              $name = [string]$pack.name
+              if ($packsByName.ContainsKey($name)) { throw "duplicate pack in lock: $name" }
+              $packsByName[$name] = $pack
+            }
+            $expected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $pending = [System.Collections.Generic.Queue[string]]::new()
+            foreach ($rootPack in @("pyfltk", "wxpython")) { $pending.Enqueue($rootPack) }
+            while ($pending.Count -gt 0) {
+              $name = $pending.Dequeue()
+              if (-not $expected.Add($name)) { continue }
+              if (-not $packsByName.ContainsKey($name)) { throw "required pack is missing from lock: $name" }
+              foreach ($dependency in @($packsByName[$name].dependencies)) {
+                $pending.Enqueue([string]$dependency)
+              }
+            }
+            $unexpected = @($packsByName.Keys | Where-Object { -not $expected.Contains($_) } | Sort-Object)
+            if ($unexpected.Count -gt 0) {
+              throw "lock contains packs outside the requested dependency closure: $($unexpected -join ', ')"
+            }
+            $wx = @($lock.packs | Where-Object name -eq "wxpython")
+            $fltk = @($lock.packs | Where-Object name -eq "pyfltk")
+            if ($wx.Count -ne 1 -or @($wx[0].suppressed_system_libraries) -notcontains "gdiplus.lib") {
+              throw "wxpython lock record does not suppress gdiplus.lib"
+            }
+            if ($fltk.Count -ne 1 -or @($fltk[0].system_libraries) -notcontains "gdiplus.lib") {
+              throw "pyfltk lock record does not request gdiplus.lib"
+            }
+            pysuture build `
+              --python "${{ matrix.python }}" `
+              --mode console `
+              --output "wx-fltk-${{ matrix.python }}" `
+              --frozen-lock
+            if ($LASTEXITCODE -ne 0) { throw "pysuture build failed with $LASTEXITCODE" }
           }
-          $wx = @($lock.packs | Where-Object name -eq "wxpython")
-          $fltk = @($lock.packs | Where-Object name -eq "pyfltk")
-          if ($wx.Count -ne 1 -or @($wx[0].suppressed_system_libraries) -notcontains "gdiplus.lib") {
-            throw "wxpython lock record does not suppress gdiplus.lib"
+          finally {
+            Pop-Location
           }
-          if ($fltk.Count -ne 1 -or @($fltk[0].system_libraries) -notcontains "gdiplus.lib") {
-            throw "pyfltk lock record does not request gdiplus.lib"
-          }
-          pysuture build `
-            --python "${{ matrix.python }}" `
-            --mode console `
-            --output "wx-fltk-${{ matrix.python }}" `
-            --frozen-lock
-          Pop-Location
       - name: Run without external runtimes or extraction
         shell: pwsh
         run: |
