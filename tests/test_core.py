@@ -1466,6 +1466,138 @@ class CoreTests(unittest.TestCase):
                     )
                 )
 
+    def test_nested_canonical_freeze_support_calls_are_removed(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if condition:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        from multiprocessing import freeze_support as fs\n"
+            "        fs()\n"
+            "    try:\n"
+            "        mp.freeze_support()\n"
+            "    except Exception:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    finally:\n"
+            "        mp.freeze_support()\n"
+            "    for item in items:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    while condition:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    with context_manager():\n"
+            "        mp.freeze_support()\n"
+            "    match value:\n"
+            "        case 1:\n"
+            "            mp.freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+
+        remaining_calls = [
+            node
+            for node in ast.walk(guard)
+            if isinstance(node, ast.Call)
+            and (
+                (
+                    isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "mp"
+                    and node.func.attr == "freeze_support"
+                )
+                or (isinstance(node.func, ast.Name) and node.func.id == "fs")
+            )
+        ]
+        self.assertEqual(remaining_calls, [])
+
+    def test_nested_canonical_freeze_support_does_not_consume_malformed_argv(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing\n"
+            "if __name__ == '__main__':\n"
+            "    if True:\n"
+            "        multiprocessing.freeze_support()\n"
+            "    try:\n"
+            "        application_started()\n"
+            "    finally:\n"
+            "        multiprocessing.freeze_support()\n"
+            "    application_started()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+        ast.fix_missing_locations(tree)
+        prepared = compile(tree, "<nested-freeze-support>", "exec")
+        application_started = mock.Mock()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "demo.exe",
+                    "--multiprocessing-fork",
+                    "parent_pid=1",
+                    "pipe_handle=not-a-handle",
+                ],
+            ),
+            mock.patch("multiprocessing.freeze_support") as freeze_support,
+        ):
+            exec(
+                prepared,
+                {
+                    "__name__": "__main__",
+                    "application_started": application_started,
+                },
+            )
+        freeze_support.assert_not_called()
+        self.assertEqual(application_started.call_count, 2)
+
+    def test_nested_custom_freeze_support_rebinding_is_preserved(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if use_application_hook:\n"
+            "        mp.freeze_support = application_hook\n"
+            "        mp.freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "mp"
+                and node.func.attr == "freeze_support"
+                for node in ast.walk(guard)
+            )
+        )
+
     def test_unverified_bare_freeze_support_call_gets_canonical_prelude(self) -> None:
         guard = ast.If(
             test=ast.Constant(value=True),

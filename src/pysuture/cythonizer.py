@@ -259,6 +259,189 @@ def _is_bound_freeze_support_call(
     )
 
 
+def _bindings_without_nodes(
+    direct_names: set[str],
+    module_names: set[str],
+    *nodes: ast.AST | None,
+) -> tuple[set[str], set[str]]:
+    visitor = _CurrentScopeBindingVisitor()
+    for node in nodes:
+        if node is not None:
+            visitor.visit(node)
+    nested_direct_names = set(direct_names)
+    nested_module_names = set(module_names)
+    nested_direct_names.difference_update(visitor.names)
+    nested_module_names.difference_update(visitor.names)
+    return nested_direct_names, nested_module_names
+
+
+def _ensure_nonempty_body(body: list[ast.stmt], owner: ast.AST) -> None:
+    if not body:
+        body.append(ast.copy_location(ast.Pass(), owner))
+
+
+def _remove_nested_canonical_freeze_support_calls(
+    statement: ast.stmt,
+    direct_names: set[str],
+    module_names: set[str],
+) -> None:
+    if isinstance(statement, ast.If):
+        branch_direct, branch_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            statement.test,
+        )
+        _remove_canonical_freeze_support_calls(
+            statement.body,
+            set(branch_direct),
+            set(branch_modules),
+        )
+        _ensure_nonempty_body(statement.body, statement)
+        _remove_canonical_freeze_support_calls(
+            statement.orelse,
+            set(branch_direct),
+            set(branch_modules),
+        )
+        return
+
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        # A loop body may run more than once.  If it can replace a canonical
+        # binding, calls earlier in a later iteration are no longer provably
+        # the stdlib helper and must be preserved.
+        loop_direct, loop_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            statement.iter,
+            statement.target,
+            *statement.body,
+        )
+        _remove_canonical_freeze_support_calls(
+            statement.body,
+            set(loop_direct),
+            set(loop_modules),
+        )
+        _ensure_nonempty_body(statement.body, statement)
+        _remove_canonical_freeze_support_calls(
+            statement.orelse,
+            set(loop_direct),
+            set(loop_modules),
+        )
+        return
+
+    if isinstance(statement, ast.While):
+        loop_direct, loop_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            statement.test,
+            *statement.body,
+        )
+        _remove_canonical_freeze_support_calls(
+            statement.body,
+            set(loop_direct),
+            set(loop_modules),
+        )
+        _ensure_nonempty_body(statement.body, statement)
+        _remove_canonical_freeze_support_calls(
+            statement.orelse,
+            set(loop_direct),
+            set(loop_modules),
+        )
+        return
+
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        header_nodes: list[ast.AST | None] = []
+        for item in statement.items:
+            header_nodes.extend((item.context_expr, item.optional_vars))
+        body_direct, body_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            *header_nodes,
+        )
+        _remove_canonical_freeze_support_calls(
+            statement.body,
+            body_direct,
+            body_modules,
+        )
+        _ensure_nonempty_body(statement.body, statement)
+        return
+
+    if isinstance(statement, (ast.Try, ast.TryStar)):
+        body_direct = set(direct_names)
+        body_modules = set(module_names)
+        _remove_canonical_freeze_support_calls(
+            statement.body,
+            body_direct,
+            body_modules,
+        )
+        _ensure_nonempty_body(statement.body, statement)
+        _remove_canonical_freeze_support_calls(
+            statement.orelse,
+            set(body_direct),
+            set(body_modules),
+        )
+
+        handler_direct, handler_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            *statement.body,
+        )
+        for handler in statement.handlers:
+            current_direct, current_modules = _bindings_without_nodes(
+                handler_direct,
+                handler_modules,
+                handler.type,
+            )
+            if handler.name is not None:
+                current_direct.discard(handler.name)
+                current_modules.discard(handler.name)
+            _remove_canonical_freeze_support_calls(
+                handler.body,
+                current_direct,
+                current_modules,
+            )
+            _ensure_nonempty_body(handler.body, handler)
+
+        final_direct, final_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            *statement.body,
+            *statement.orelse,
+            *(child for handler in statement.handlers for child in handler.body),
+        )
+        for handler in statement.handlers:
+            if handler.name is not None:
+                final_direct.discard(handler.name)
+                final_modules.discard(handler.name)
+        _remove_canonical_freeze_support_calls(
+            statement.finalbody,
+            final_direct,
+            final_modules,
+        )
+        if not statement.handlers and not statement.finalbody:
+            _ensure_nonempty_body(statement.finalbody, statement)
+        return
+
+    if isinstance(statement, ast.Match):
+        subject_direct, subject_modules = _bindings_without_nodes(
+            direct_names,
+            module_names,
+            statement.subject,
+        )
+        for case in statement.cases:
+            case_direct, case_modules = _bindings_without_nodes(
+                subject_direct,
+                subject_modules,
+                case.pattern,
+                case.guard,
+            )
+            _remove_canonical_freeze_support_calls(
+                case.body,
+                case_direct,
+                case_modules,
+            )
+            _ensure_nonempty_body(case.body, case.pattern)
+
+
 def _remove_canonical_freeze_support_calls(
     body: list[ast.stmt],
     direct_names: set[str],
@@ -272,6 +455,11 @@ def _remove_canonical_freeze_support_calls(
         call = _no_argument_call(statement)
         if call is not None and _is_bound_freeze_support_call(call, direct_names, module_names):
             continue
+        _remove_nested_canonical_freeze_support_calls(
+            statement,
+            direct_names,
+            module_names,
+        )
         retained.append(statement)
         _update_freeze_support_bindings(statement, direct_names, module_names)
     body[:] = retained
@@ -293,10 +481,24 @@ def _ensure_freeze_support_prelude(
 ) -> None:
     direct_bindings = set(direct_names or ())
     module_bindings = set(module_names or ())
-    _remove_canonical_freeze_support_calls(guard.body, direct_bindings, module_bindings)
+    strict = _strict_freeze_support_prelude()
     if _has_strict_freeze_support_prelude(guard.body):
+        for statement in guard.body[:len(strict)]:
+            _update_freeze_support_bindings(
+                statement,
+                direct_bindings,
+                module_bindings,
+            )
+        tail = guard.body[len(strict):]
+        _remove_canonical_freeze_support_calls(
+            tail,
+            direct_bindings,
+            module_bindings,
+        )
+        guard.body[len(strict):] = tail
         return
-    guard.body[0:0] = _strict_freeze_support_prelude()
+    _remove_canonical_freeze_support_calls(guard.body, direct_bindings, module_bindings)
+    guard.body[0:0] = strict
 
 
 def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bool) -> tuple[Path, bool]:
