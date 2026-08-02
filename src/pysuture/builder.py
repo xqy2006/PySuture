@@ -19,6 +19,7 @@ from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
 from .resolver import (
+    PLAIN_LIBRARY_NAME_PATTERN,
     validate_locked_asset_metadata,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
@@ -42,11 +43,22 @@ REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
 
 
 def _resolve_system_libraries(libraries: list[str], suppressed: list[str]) -> list[str]:
-    suppressed_names = {str(name).casefold() for name in suppressed}
+    required_names = {name.casefold() for name in REQUIRED_WINDOWS_SYSTEM_LIBRARIES}
+    suppressed_names: set[str] = set()
+    for library in suppressed:
+        name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid suppressed system library name: {name!r}")
+        key = name.casefold()
+        if key in required_names:
+            raise BuildError(f"packs cannot suppress required Windows system library {name}")
+        suppressed_names.add(key)
     resolved: list[str] = []
     seen: set[str] = set()
     for library in libraries:
         name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid system library name: {name!r}")
         key = name.casefold()
         if key in suppressed_names or key in seen:
             continue

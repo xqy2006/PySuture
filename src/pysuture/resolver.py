@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import re
 import sys
 from dataclasses import dataclass
 
@@ -58,6 +59,27 @@ TOOLCHAIN_LINK_COMPATIBILITY_FIELDS = (
     "platform_toolset",
     "runtime_library",
 )
+
+PLAIN_LIBRARY_NAME_PATTERN = re.compile(
+    r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\.lib",
+    re.ASCII | re.IGNORECASE,
+)
+
+
+def _validate_plain_library_names(value: object, *, owner: str, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise LockError(f"{owner} {field} must be a list of plain .lib basenames")
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in value:
+        if not isinstance(name, str) or PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise LockError(f"{owner} {field} must be a list of plain .lib basenames")
+        key = name.casefold()
+        if key in seen:
+            raise LockError(f"{owner} {field} contains duplicate library {name!r}")
+        seen.add(key)
+        names.append(name)
+    return names
 
 
 def _locked_metadata_projection(metadata: dict) -> dict:
@@ -344,6 +366,18 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
     claimed_resources: dict[str, str] = {}
     claimed_descriptors: dict[str, str] = {}
 
+    runtime_link_libraries = _validate_plain_library_names(
+        runtime_metadata.get("link_libraries", []),
+        owner="runtime SDK",
+        field="link_libraries",
+    )
+    _validate_plain_library_names(
+        runtime_metadata.get("system_libraries", []),
+        owner="runtime SDK",
+        field="system_libraries",
+    )
+    runtime_library_names = {name.casefold() for name in runtime_link_libraries}
+
     runtime_frozen = runtime_metadata.get("frozen_module_names", [])
     if not isinstance(runtime_frozen, list):
         raise LockError("runtime SDK frozen_module_names must be a list")
@@ -366,6 +400,33 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
         table[value] = owner
 
     for owner, metadata in packs:
+        native_libraries = _validate_plain_library_names(
+            metadata.get("libraries", []),
+            owner=f"pack {owner}",
+            field="libraries",
+        )
+        wholearchive = _validate_plain_library_names(
+            metadata.get("wholearchive", []),
+            owner=f"pack {owner}",
+            field="wholearchive",
+        )
+        native_library_names = {name.casefold() for name in native_libraries}
+        missing_wholearchive = [
+            name for name in wholearchive if name.casefold() not in native_library_names
+        ]
+        if missing_wholearchive:
+            raise LockError(
+                f"pack {owner} wholearchive libraries are missing from libraries: "
+                + ", ".join(missing_wholearchive)
+            )
+        runtime_collisions = [
+            name for name in native_libraries if name.casefold() in runtime_library_names
+        ]
+        if runtime_collisions:
+            raise LockError(
+                f"pack {owner} native libraries conflict with the runtime SDK: "
+                + ", ".join(runtime_collisions)
+            )
         descriptor = metadata.get("descriptor_symbol")
         claim(claimed_descriptors, descriptor, owner, "descriptor symbol")
         frozen_modules = metadata.get("frozen_modules", [])
@@ -432,21 +493,22 @@ def validate_pack_runtime_compatibility(
     for owner, metadata in packs:
         dependencies = metadata.get("dependencies", [])
         conflicts = metadata.get("conflicts", [])
-        suppressed_system_libraries = metadata.get("suppressed_system_libraries", [])
+        _validate_plain_library_names(
+            metadata.get("system_libraries", []),
+            owner=f"pack {owner}",
+            field="system_libraries",
+        )
+        _validate_plain_library_names(
+            metadata.get("suppressed_system_libraries", []),
+            owner=f"pack {owner}",
+            field="suppressed_system_libraries",
+        )
         if not isinstance(dependencies, list) or not all(
             isinstance(name, str) and name for name in dependencies
         ):
             raise LockError(f"pack {owner} has invalid dependency metadata")
         if not isinstance(conflicts, list) or not all(isinstance(name, str) and name for name in conflicts):
             raise LockError(f"pack {owner} has invalid conflict metadata")
-        if not isinstance(suppressed_system_libraries, list) or not all(
-            isinstance(name, str)
-            and name.lower().endswith(".lib")
-            and "/" not in name
-            and "\\" not in name
-            for name in suppressed_system_libraries
-        ):
-            raise LockError(f"pack {owner} has invalid suppressed system library metadata")
         missing = [name for name in dependencies if name.casefold() not in selected_names]
         if missing:
             raise LockError(f"pack {owner} dependencies are missing from the lock: {', '.join(missing)}")

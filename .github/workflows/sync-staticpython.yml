@@ -113,9 +113,9 @@ jobs:
         with:
           name: failed-build-${{ matrix.python }}-${{ matrix.mode }}
           path: |
-            examples/smoke/build/**/*.map
-            examples/smoke/build/**/*.rsp
-            examples/smoke/build/**/build-report.json
+            examples/smoke/.pysuture/build/**/*.map
+            examples/smoke/.pysuture/build/**/*.rsp
+            examples/smoke/.pysuture/build/**/build-report.json
           if-no-files-found: warn
           retention-days: 7
       - name: Console Unicode, resource, argv, and multiprocessing smoke
@@ -230,9 +230,9 @@ jobs:
         with:
           name: failed-ui-link-${{ matrix.python }}
           path: |
-            examples/wx-fltk-smoke/build/**/*.map
-            examples/wx-fltk-smoke/build/**/*.rsp
-            examples/wx-fltk-smoke/build/**/build-report.json
+            examples/wx-fltk-smoke/.pysuture/build/**/*.map
+            examples/wx-fltk-smoke/.pysuture/build/**/*.rsp
+            examples/wx-fltk-smoke/.pysuture/build/**/build-report.json
           if-no-files-found: warn
           retention-days: 7
       - name: Run without external runtimes or extraction
