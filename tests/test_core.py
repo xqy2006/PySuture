@@ -881,6 +881,32 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "credential"):
             collect_application_resources(config)
 
+    def test_secret_symlink_name_is_checked_before_resolution(self) -> None:
+        self._write_project("pass\n")
+        matched = self.root / ".env"
+        matched.write_text("placeholder\n", encoding="utf-8")
+        target = self.root / "public-config.txt"
+        target.write_text("ordinary data\n", encoding="utf-8")
+        resolved_target = target.resolve()
+        original_resolve = Path.resolve
+
+        def resolve_symlink_name(path: Path, *args: object, **kwargs: object) -> Path:
+            if path == matched:
+                return resolved_target
+            return original_resolve(path, *args, **kwargs)
+
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env", "config/settings.txt"),),
+        )
+        # Simulate symlink resolution without requiring Windows symlink
+        # privileges on the test runner.
+        with mock.patch.object(
+            Path, "resolve", autospec=True, side_effect=resolve_symlink_name
+        ):
+            with self.assertRaisesRegex(BuildError, r"credential.*\.env"):
+                collect_application_resources(config)
+
     def test_wildcard_resource_accepts_windows_target_separator(self) -> None:
         self._write_project("pass\n")
         assets = self.root / "assets"
