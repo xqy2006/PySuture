@@ -11,6 +11,25 @@ from .constants import SECRET_BASENAMES, SECRET_SUFFIXES
 from .errors import BuildError
 
 
+SECRET_NAME_PATTERNS = (
+    re.compile(r"^\.env(?:[._-].+)?$"),
+    re.compile(
+        r"^(?:credentials|client[_-]?secret|service[_-]?account)(?:[._-].+)?"
+        r"(?:\.json|\.toml|\.ya?ml)?$"
+    ),
+    re.compile(r"^id_(?:dsa|ecdsa|ed25519|rsa)(?:[._-].+)?$"),
+)
+PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN PRIVATE KEY-----",
+    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+    b"-----BEGIN RSA PRIVATE KEY-----",
+    b"-----BEGIN DSA PRIVATE KEY-----",
+    b"-----BEGIN EC PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH PRIVATE KEY-----",
+    b"PuTTY-User-Key-File-",
+)
+
+
 @dataclass(frozen=True)
 class ResourceRecord:
     source: Path
@@ -52,7 +71,18 @@ def _safe_target(value: str) -> str:
 
 def _looks_secret(path: Path) -> bool:
     name = path.name.casefold()
-    return name in SECRET_BASENAMES or path.suffix.casefold() in SECRET_SUFFIXES
+    if (
+        name in SECRET_BASENAMES
+        or path.suffix.casefold() in SECRET_SUFFIXES
+        or any(pattern.fullmatch(name) for pattern in SECRET_NAME_PATTERNS)
+    ):
+        return True
+    try:
+        with path.open("rb") as source:
+            prefix = source.read(128 * 1024)
+    except OSError:
+        return False
+    return any(marker in prefix for marker in PRIVATE_KEY_MARKERS)
 
 
 def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceRecord], list[str]]:
