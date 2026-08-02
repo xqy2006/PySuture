@@ -65,7 +65,6 @@ def locked_toolchain_mismatches(expected: dict, actual: MSVCToolchain) -> dict[s
     mismatches = {}
     for field in (
         "visual_studio_version",
-        "vscmd_version",
         "vc_tools_version",
         "windows_sdk_version",
         "platform_toolset",
