@@ -49,11 +49,15 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("  determinism:\n", workflow)
         self.assertIn("check_frozen_lock_determinism.py", workflow)
         self.assertIn("needs: [candidate, e2e, determinism]", workflow)
+        self.assertIn('first = work_root / "first-project"', script)
+        self.assertIn('/ "nested"', script)
         self.assertIn("second-location-with-a-different-length", script)
         self.assertIn('"--frozen-lock"', script)
         self.assertIn('"--offline"', script)
         self.assertIn('REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map")', script)
         self.assertIn("frozen build mutated pysuture.lock", script)
+        self.assertIn("_assert_reports_match", script)
+        self.assertIn("distribution directory must contain only", script)
 
 
 if __name__ == "__main__":

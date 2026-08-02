@@ -244,12 +244,12 @@ jobs:
         with:
           name: frozen-lock-determinism-diagnostics
           path: |
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-location/project/.pysuture/build/**/build-report.json
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-location/project/.pysuture/build/**/*.map
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-location/project/.pysuture/build/**/*.rsp
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/second-location-with-a-different-length/project/.pysuture/build/**/build-report.json
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/second-location-with-a-different-length/project/.pysuture/build/**/*.map
-            ${{ runner.temp }}/pysuture-frozen-lock-determinism/second-location-with-a-different-length/project/.pysuture/build/**/*.rsp
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.rsp
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.rsp
           if-no-files-found: warn
 
   propose-update:
