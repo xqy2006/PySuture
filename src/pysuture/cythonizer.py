@@ -73,6 +73,59 @@ def _insertion_index(body: list[ast.stmt]) -> int:
     return index
 
 
+def _is_freeze_support_call(statement: ast.stmt) -> bool:
+    if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return False
+    call = statement.value
+    if call.args or call.keywords:
+        return False
+    if isinstance(call.func, ast.Name):
+        return call.func.id == "freeze_support"
+    return (
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "freeze_support"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "multiprocessing"
+    )
+
+
+def _has_freeze_support_prelude(body: list[ast.stmt]) -> bool:
+    if body and _is_freeze_support_call(body[0]):
+        return True
+    if len(body) < 2 or not _is_freeze_support_call(body[1]):
+        return False
+    first = body[0]
+    call = body[1].value
+    if isinstance(call.func, ast.Name) and isinstance(first, ast.ImportFrom):
+        return (
+            first.level == 0
+            and first.module == "multiprocessing"
+            and any(
+                alias.name == "freeze_support" and (alias.asname or alias.name) == call.func.id
+                for alias in first.names
+            )
+        )
+    if isinstance(call.func, ast.Attribute) and isinstance(first, ast.Import):
+        return any(
+            alias.name == "multiprocessing" and (alias.asname or alias.name) == "multiprocessing"
+            for alias in first.names
+        )
+    return False
+
+
+def _ensure_freeze_support_prelude(guard: ast.If) -> None:
+    if _has_freeze_support_prelude(guard.body):
+        return
+    guard.body[0:0] = [
+        ast.ImportFrom(
+            module="multiprocessing",
+            names=[ast.alias(name="freeze_support")],
+            level=0,
+        ),
+        ast.Expr(value=ast.Call(func=ast.Name(id="freeze_support", ctx=ast.Load()), args=[], keywords=[])),
+    ]
+
+
 def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bool) -> tuple[Path, bool]:
     try:
         tree = ast.parse(record.path.read_text(encoding="utf-8"), filename=str(record.path))
@@ -83,22 +136,7 @@ def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bo
         for statement in tree.body:
             if isinstance(statement, ast.If) and _is_main_guard(statement.test):
                 guard_found = True
-                already_present = any(
-                    isinstance(child, ast.Expr)
-                    and isinstance(child.value, ast.Call)
-                    and isinstance(child.value.func, ast.Name)
-                    and child.value.func.id == "freeze_support"
-                    for child in statement.body
-                )
-                if not already_present:
-                    statement.body[0:0] = [
-                        ast.ImportFrom(
-                            module="multiprocessing",
-                            names=[ast.alias(name="freeze_support")],
-                            level=0,
-                        ),
-                        ast.Expr(value=ast.Call(func=ast.Name(id="freeze_support", ctx=ast.Load()), args=[], keywords=[])),
-                    ]
+                _ensure_freeze_support_prelude(statement)
                 break
     if record.is_package:
         package_setup: list[ast.stmt] = [

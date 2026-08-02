@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -36,7 +37,11 @@ from pysuture.cache import (
 )
 from pysuture.cli import _unresolved_dynamic_gaps, _validate_locked_imports, main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
-from pysuture.cythonizer import cythonize_modules, installed_cython_version
+from pysuture.cythonizer import (
+    _ensure_freeze_support_prelude,
+    cythonize_modules,
+    installed_cython_version,
+)
 from pysuture.errors import AnalysisError, BuildError, ConfigurationError, LockError
 from pysuture.launcher import write_launcher
 from pysuture.lockfile import (
@@ -1158,6 +1163,52 @@ class CoreTests(unittest.TestCase):
         prepared = next(unit.prepared_source for unit in units if unit.module.name == "app")
         prepared_text = prepared.read_text(encoding="utf-8")
         self.assertIn("freeze_support", prepared_text)
+
+    def test_freeze_support_is_prepended_before_guard_work(self) -> None:
+        tree = ast.parse(
+            "if __name__ == '__main__':\n"
+            "    start_children()\n"
+            "    from multiprocessing import freeze_support\n"
+            "    freeze_support()\n"
+        )
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        prepared = ast.unparse(tree)
+        reparsed_guard = ast.parse(prepared).body[0]
+        self.assertIsInstance(reparsed_guard, ast.If)
+        self.assertIsInstance(reparsed_guard.body[0], ast.ImportFrom)
+        self.assertTrue(
+            isinstance(reparsed_guard.body[1], ast.Expr)
+            and isinstance(reparsed_guard.body[1].value, ast.Call)
+            and isinstance(reparsed_guard.body[1].value.func, ast.Name)
+            and reparsed_guard.body[1].value.func.id == "freeze_support"
+        )
+        self.assertEqual(
+            sum(
+                1
+                for statement in reparsed_guard.body
+                if isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id == "freeze_support"
+            ),
+            2,
+        )
+        self.assertIn("start_children()", prepared)
+        self.assertGreater(prepared.index("start_children()"), prepared.index("freeze_support()"))
+
+    def test_existing_freeze_support_prelude_is_not_duplicated(self) -> None:
+        tree = ast.parse(
+            "if __name__ == '__main__':\n"
+            "    from multiprocessing import freeze_support\n"
+            "    freeze_support()\n"
+            "    start_children()\n"
+        )
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), 3)
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")
