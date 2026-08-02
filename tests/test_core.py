@@ -881,6 +881,21 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "credential"):
             collect_application_resources(config)
 
+    def test_wildcard_resource_accepts_windows_target_separator(self) -> None:
+        self._write_project("pass\n")
+        assets = self.root / "assets"
+        assets.mkdir()
+        (assets / "payload.txt").write_text("payload", encoding="utf-8")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("assets/*.txt", "embedded\\"),),
+        )
+
+        records, warnings = collect_application_resources(config)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([record.target for record in records], ["embedded/payload.txt"])
+
     def test_resource_embedding_rejects_source_drift(self) -> None:
         source = self.root / "payload.bin"
         source.write_bytes(b"original")
