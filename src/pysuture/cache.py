@@ -331,11 +331,13 @@ def _tree_manifest(root: Path) -> dict[str, object]:
         for entry in entries:
             parts = (*relative_parts, entry.name)
             relative = "/".join(parts)
-            if not relative_parts and entry.name == _EXTRACTED_MARKER_NAME:
-                continue
             entry_stat = entry.stat(follow_symlinks=False)
             if _is_reparse_point(entry_stat) or stat.S_ISLNK(entry_stat.st_mode):
                 raise LockError(f"extracted cache contains a link or reparse point: {relative}")
+            if not relative_parts and entry.name == _EXTRACTED_MARKER_NAME:
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    raise LockError(f"extracted cache marker is not a regular file: {relative}")
+                continue
             if stat.S_ISDIR(entry_stat.st_mode):
                 directories.append(relative)
                 visit(Path(entry.path), parts)
@@ -363,6 +365,9 @@ def _cache_matches_manifest(
 ) -> bool:
     marker = destination / _EXTRACTED_MARKER_NAME
     try:
+        marker_stat = marker.stat(follow_symlinks=False)
+        if not stat.S_ISREG(marker_stat.st_mode) or _is_reparse_point(marker_stat):
+            return False
         payload = json.loads(marker.read_text(encoding="utf-8"))
         if (
             payload.get("manifest_version") != _EXTRACTED_MANIFEST_VERSION

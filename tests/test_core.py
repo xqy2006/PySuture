@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ if str(SRC_ROOT) not in sys.path:
 from pysuture.analyzer import _private_package_modules, analyze_project
 from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
 from pysuture.cache import (
+    _cache_matches_manifest,
     _extract_validated_members,
     _latest_prerelease_asset_url,
     _publish_extracted_cache,
@@ -722,6 +724,36 @@ class CoreTests(unittest.TestCase):
             marker_path.write_text(json.dumps(marker), encoding="utf-8")
             extract_asset(archive_path, digest)
         self.assertEqual(target.read_bytes(), b"verified")
+
+    def test_extracted_cache_rejects_reparse_marker_before_reading(self) -> None:
+        destination = self.root / "extracted"
+        destination.mkdir()
+        marker = destination / ".pysuture-extracted.json"
+        tree = {"directories": [], "files": []}
+        marker.write_text(
+            json.dumps(
+                {
+                    "asset_sha256": "a" * 64,
+                    "directories": [],
+                    "files": [],
+                    "manifest_version": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_stat = Path.stat
+
+        def stat_with_reparse(path: Path, *, follow_symlinks: bool = True):
+            result = original_stat(path, follow_symlinks=follow_symlinks)
+            if path == marker and not follow_symlinks:
+                return mock.Mock(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_file_attributes=0x400,
+                )
+            return result
+
+        with mock.patch.object(Path, "stat", autospec=True, side_effect=stat_with_reparse):
+            self.assertFalse(_cache_matches_manifest(destination, "a" * 64, tree))
 
     def test_extract_asset_rejects_duplicate_normalized_members(self) -> None:
         archive_path, digest = self._write_asset_archive(
