@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,6 +71,13 @@ def _build_artifacts(project: Path, output: str) -> dict[str, Path]:
     if payload.get("status") != "passed":
         raise RuntimeError(f"build report did not pass: {reports[0]}")
     executable = project / "dist" / f"{output}.exe"
+    dist_dir = project / "dist"
+    dist_entries = sorted(dist_dir.iterdir()) if dist_dir.is_dir() else []
+    if dist_entries != [executable] or not executable.is_file():
+        rendered = ", ".join(path.name for path in dist_entries) or "<missing>"
+        raise RuntimeError(
+            f"distribution directory must contain only {executable.name}: {rendered}"
+        )
     artifacts = payload.get("artifacts", {})
     result = {
         "executable": executable,
@@ -80,6 +89,54 @@ def _build_artifacts(project: Path, output: str) -> dict[str, Path]:
     if missing:
         raise RuntimeError(f"build is missing artifact(s): {', '.join(missing)}")
     return result
+
+
+def _normalize_report(value: object, project: Path) -> object:
+    """Replace the one intentionally varying project root in every report string."""
+    project_root = project.resolve().as_posix()
+    if isinstance(value, dict):
+        return {
+            key: _normalize_report(item, project)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_normalize_report(item, project) for item in value]
+    if isinstance(value, str):
+        normalized = value.replace("\\", "/")
+        return re.sub(
+            re.escape(project_root),
+            "<PROJECT_ROOT>",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    return value
+
+
+def _assert_reports_match(
+    first_report: dict,
+    second_report: dict,
+    *,
+    first_project: Path,
+    second_project: Path,
+) -> None:
+    normalized_first = _normalize_report(first_report, first_project)
+    normalized_second = _normalize_report(second_report, second_project)
+    if normalized_first == normalized_second:
+        return
+    first_text = json.dumps(normalized_first, ensure_ascii=False, indent=2, sort_keys=True)
+    second_text = json.dumps(normalized_second, ensure_ascii=False, indent=2, sort_keys=True)
+    difference = "\n".join(
+        difflib.unified_diff(
+            first_text.splitlines(),
+            second_text.splitlines(),
+            fromfile="first-build-report.json",
+            tofile="second-build-report.json",
+            lineterm="",
+        )
+    )
+    raise RuntimeError(
+        "normalized frozen-lock build reports differ across roots:\n" + difference
+    )
 
 
 def _work_root(argument: Path | None) -> tuple[Path, bool]:
@@ -113,8 +170,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"runtime index is not a file: {index}")
 
     work_root, temporary = _work_root(args.work_root)
-    first = work_root / "first-location" / "project"
-    second = work_root / "second-location-with-a-different-length" / "project"
+    first = work_root / "first-project"
+    second = (
+        work_root
+        / "nested"
+        / "second-location-with-a-different-length"
+        / "project"
+    )
     environment = os.environ.copy()
     environment["PYSUTURE_CACHE_DIR"] = str(work_root / "shared-cache")
     try:
@@ -151,6 +213,12 @@ def main(argv: list[str] | None = None) -> int:
                 "identical frozen locks produced different build identities: "
                 f"{first_report.get('build_id')} != {second_report.get('build_id')}"
             )
+        _assert_reports_match(
+            first_report,
+            second_report,
+            first_project=first,
+            second_project=second,
+        )
 
         hashes = {
             name: (_sha256(first_artifacts[name]), _sha256(second_artifacts[name]))
