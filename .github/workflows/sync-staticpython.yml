@@ -116,6 +116,24 @@ jobs:
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
           & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
           if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          $env:PYSUTURE_SMOKE_ARGV_PROBE = "1"
+          $probeCases = @(
+            [pscustomobject]@{ Args = @("-c", "print('must not run')", "-m", "not.a.module", "argument with spaces") },
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") }
+          )
+          foreach ($probeCase in $probeCases) {
+            $probeArgs = [object[]]$probeCase.Args
+            $probeOutput = @(& "$work\smoke-${{ matrix.python }}-console.exe" @probeArgs)
+            if ($LASTEXITCODE -ne 0) { throw "argv probe failed with $LASTEXITCODE" }
+            $probe = $probeOutput[-1] | ConvertFrom-Json
+            $expected = ConvertTo-Json -Compress -InputObject ([object[]]$probeArgs)
+            $actual = ConvertTo-Json -Compress -InputObject ([object[]]$probe.argv)
+            if ($actual -ne $expected) {
+              throw "argv was not preserved: expected $expected, got $actual"
+            }
+          }
+          Remove-Item Env:PYSUTURE_SMOKE_ARGV_PROBE
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "runtime created or extracted files" }
       - name: Windowed startup smoke

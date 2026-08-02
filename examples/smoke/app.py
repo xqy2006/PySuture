@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -89,5 +90,14 @@ def self_test() -> int:
     return 0
 
 
+def argv_probe() -> int:
+    print(json.dumps({"argv": sys.argv[1:]}, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(self_test() if "--self-test" in sys.argv else 0)
+    if "--self-test" in sys.argv:
+        raise SystemExit(self_test())
+    if os.environ.get("PYSUTURE_SMOKE_ARGV_PROBE") == "1":
+        raise SystemExit(argv_probe())
+    raise SystemExit(0)
