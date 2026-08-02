@@ -241,6 +241,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(report.namespace_packages, ("ns", "ns.child"))
         self.assertIn("attrs", report.external_imports)
 
+    def test_namespace_child_under_regular_package_is_not_preinitialized(self) -> None:
+        self._write_project("import pkg.portion.module\n")
+        (self.root / "pkg" / "portion").mkdir()
+        (self.root / "pkg" / "portion" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        report = analyze_project(load_project_config(self.root))
+        self.assertIn("pkg.portion", report.namespace_packages)
+        self.assertNotIn("pkg", report.namespace_packages)
+
     def test_dynamic_import_gap_requires_explicit_declaration(self) -> None:
         self._write_project("import importlib\nname = 'pkg.helper'\nimportlib.import_module(name)\n")
         config = replace(load_project_config(self.root), include_modules=())
@@ -1174,11 +1182,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("INT_MAX", text)
         self.assertNotIn("_wcstoi64", text)
         self.assertIn('PyImport_ImportModule("importlib.machinery")', text)
-        self.assertIn('PyModule_AddObjectRef(module, "__spec__", spec)', text)
-        self.assertIn('PyModule_AddObjectRef(module, "__loader__", Py_None)', text)
-        self.assertIn('PyObject_SetAttrString(spec, "submodule_search_locations", path)', text)
+        self.assertIn("pysuture_namespace_find_spec", text)
+        self.assertIn("PyModule_AddFunctions(finder, pysuture_namespace_finder_methods)", text)
+        self.assertIn("PyList_Insert(meta_path, 0, finder)", text)
+        self.assertIn('PyObject_SetAttrString(spec, "submodule_search_locations", locations)', text)
+        self.assertIn('    "ns",', text)
+        self.assertIn('    "ns.child",', text)
         self.assertLess(
-            text.index('pysuture_install_namespace("ns")'),
+            text.index("    if (pysuture_install_namespace_finder() < 0)"),
             text.index("pysuture_dispatch_multiprocessing(argc, argv)"),
         )
         self.assertIn("wmain(int argc", text)

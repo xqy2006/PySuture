@@ -10,6 +10,7 @@ from pathlib import Path
 
 import attrs
 import regex
+import smoke_ns
 from smoke_ns.child.probe import namespace_value
 
 
@@ -61,11 +62,18 @@ def self_test() -> int:
     child_spec = importlib.util.find_spec("smoke_ns.child")
     if (
         namespace_spec is None
-        or namespace_spec.loader is not None
+        or namespace_spec.loader is None
+        or namespace_spec.loader is not smoke_ns.__loader__
         or namespace_spec.submodule_search_locations is None
+        or namespace_spec.submodule_search_locations is not smoke_ns.__path__
+        or list(smoke_ns.__path__) != []
         or child_spec is None
-        or child_spec.loader is not None
+        or child_spec.loader is None
+        or child_spec.loader is not smoke_ns.child.__loader__
         or child_spec.submodule_search_locations is None
+        or child_spec.submodule_search_locations is not smoke_ns.child.__path__
+        or list(smoke_ns.child.__path__) != []
+        or smoke_ns.child is not sys.modules["smoke_ns.child"]
         or namespace_value() != "namespace-ok"
     ):
         return 18
