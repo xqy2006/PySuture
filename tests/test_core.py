@@ -100,18 +100,27 @@ class CoreTests(unittest.TestCase):
             "\n".join(
                 [
                     "0001:00000000 wxEntry wxbase32u.lib(main.obj)",
+                    "0001:00000008 wxEntryCleanup wxbase32u:main.obj",
                     "0001:00000010 Py_Main pythoncore.lib(main.obj)",
                     r"0001:00000020 custom_entry C:\build\main.obj",
+                    "0001:00000030 impostor notwxbase32u:main.obj",
                 ]
             ),
             {"wxbase32u.lib"},
         )
-        self.assertEqual(allowed, ["0001:00000000 wxEntry wxbase32u.lib(main.obj)"])
+        self.assertEqual(
+            allowed,
+            [
+                "0001:00000000 wxEntry wxbase32u.lib(main.obj)",
+                "0001:00000008 wxEntryCleanup wxbase32u:main.obj",
+            ],
+        )
         self.assertEqual(
             forbidden,
             [
                 "0001:00000010 Py_Main pythoncore.lib(main.obj)",
                 r"0001:00000020 custom_entry C:\build\main.obj",
+                "0001:00000030 impostor notwxbase32u:main.obj",
             ],
         )
 

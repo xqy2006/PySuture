@@ -222,18 +222,20 @@ def _classify_main_object_records(
     allowed_pack_libraries: set[str],
 ) -> tuple[list[str], list[str]]:
     records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
-    normalized_libraries = {
-        Path(name).name.casefold()
+    allowed_archive_patterns = [
+        re.compile(
+            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(name).name[:-4])}(?:\.lib)?[:(]main\.obj(?:\)|\b)"
+        )
         for name in allowed_pack_libraries
         if isinstance(name, str) and name.lower().endswith(".lib")
-    }
+    ]
     allowed = []
     forbidden = []
     for record in records:
         normalized_record = record.casefold()
         destination = (
             allowed
-            if any(library in normalized_record for library in normalized_libraries)
+            if any(pattern.search(normalized_record) for pattern in allowed_archive_patterns)
             else forbidden
         )
         destination.append(record)
