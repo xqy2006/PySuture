@@ -18,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from pysuture.analyzer import _private_package_modules, analyze_project
+from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
 from pysuture.cache import _safe_extract, sha256_bytes
 from pysuture.cli import main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
@@ -44,6 +45,9 @@ class CoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_windows_link_baseline_includes_security_apis(self) -> None:
+        self.assertIn("advapi32.lib", REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
 
     def _write_project(self, app_source: str, *, index: dict | None = None) -> None:
         (self.root / "app.py").write_text(app_source, encoding="utf-8")

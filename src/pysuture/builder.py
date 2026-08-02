@@ -30,6 +30,11 @@ FORBIDDEN_DEPENDENCY_PATTERNS = (
     re.compile(r"^ucrtbase\.dll$", re.IGNORECASE),
 )
 FORBIDDEN_ENTRY_SYMBOLS = ("Py_Main", "Py_BytesMain", "Py_RunMain", "Py_SandboxMain")
+REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
+    "advapi32.lib",
+    "shell32.lib",
+    "user32.lib",
+)
 
 
 @dataclass(frozen=True)
@@ -401,7 +406,7 @@ def build_executable(
     for library_name in assets.runtime_metadata.get("link_libraries", []):
         runtime_libraries.append(_safe_member(library_dir, library_name))
     system_libraries.extend(assets.runtime_metadata.get("system_libraries", []))
-    system_libraries.extend(["shell32.lib", "user32.lib"])
+    system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
     system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
 
     executable = build_dir / f"{output_name}.exe"
