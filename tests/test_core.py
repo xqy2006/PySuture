@@ -299,6 +299,8 @@ class CoreTests(unittest.TestCase):
         }
         self.assertEqual(locked_toolchain_mismatches(expected, toolchain), {})
         validate_locked_toolchain(expected, toolchain)
+        expected["vscmd_version"] = "17.14.999"
+        self.assertEqual(locked_toolchain_mismatches(expected, toolchain), {})
         expected["vc_tools_version"] = "14.43.34808"
         with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
             validate_locked_toolchain(expected, toolchain)
