@@ -21,4 +21,4 @@ SECRET_BASENAMES = {
     "id_rsa",
     "service-account.json",
 }
-SECRET_SUFFIXES = {".key", ".p12", ".pfx", ".pem"}
+SECRET_SUFFIXES = {".jks", ".key", ".keystore", ".p12", ".pem", ".pfx", ".ppk"}

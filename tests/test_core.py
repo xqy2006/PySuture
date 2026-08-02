@@ -1006,6 +1006,40 @@ class CoreTests(unittest.TestCase):
         source.unlink()
         with self.assertRaisesRegex(BuildError, "could not reread collected resource"):
             write_resource_sources([record], self.root / "generated")
+    def test_secret_resource_variants_and_private_key_content_are_rejected(self) -> None:
+        self._write_project("pass\n")
+        cases = {
+            ".env.production": "TOKEN=secret\n",
+            "client_secret-production.json": '{"client_secret": "secret"}\n',
+            "id_ed25519.backup": "private material\n",
+            "renamed-config.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                (self.root / name).write_text(payload, encoding="utf-8")
+                config = replace(
+                    load_project_config(self.root),
+                    data=(DataMapping(name, f"config/{name}"),),
+                )
+                with self.assertRaisesRegex(BuildError, "credential"):
+                    collect_application_resources(config)
+
+    def test_secret_resource_policy_can_warn_or_allow(self) -> None:
+        self._write_project("pass\n")
+        (self.root / ".env.local").write_text("TOKEN=secret\n", encoding="utf-8")
+        base = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env.local", "config/.env.local"),),
+        )
+        records, warnings = collect_application_resources(
+            replace(base, secret_policy="warn")
+        )
+        self.assertEqual([record.target for record in records], ["config/.env.local"])
+        self.assertEqual(len(warnings), 1)
+        _records, allowed_warnings = collect_application_resources(
+            replace(base, secret_policy="allow")
+        )
+        self.assertEqual(allowed_warnings, [])
 
     def test_zip_extraction_rejects_parent_traversal(self) -> None:
         archive_path = self.root / "unsafe.zip"
