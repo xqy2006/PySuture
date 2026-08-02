@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -69,7 +70,7 @@ def _safe_target(value: str) -> str:
     return "/".join(parts)
 
 
-def _looks_secret(path: Path) -> bool:
+def _looks_secret(path: Path, payload: bytes) -> bool:
     name = path.name.casefold()
     if (
         name in SECRET_BASENAMES
@@ -77,12 +78,7 @@ def _looks_secret(path: Path) -> bool:
         or any(pattern.fullmatch(name) for pattern in SECRET_NAME_PATTERNS)
     ):
         return True
-    try:
-        with path.open("rb") as source:
-            prefix = source.read(128 * 1024)
-    except OSError:
-        return False
-    return any(marker in prefix for marker in PRIVATE_KEY_MARKERS)
+    return any(marker in payload for marker in PRIVATE_KEY_MARKERS)
 
 
 def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceRecord], list[str]]:
@@ -102,7 +98,11 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
             resolved = path.resolve()
             if root != resolved and root not in resolved.parents:
                 raise BuildError(f"resource escapes the project root: {path}")
-            if _looks_secret(resolved):
+            try:
+                payload = resolved.read_bytes()
+            except OSError as exc:
+                raise BuildError(f"could not read matched resource: {resolved}") from exc
+            if _looks_secret(resolved, payload):
                 message = f"resource looks like a credential or private key: {resolved.relative_to(root)}"
                 if config.secret_policy == "error":
                     raise BuildError(message)
@@ -122,10 +122,6 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
                 target = _safe_target(target_value)
             if target in records:
                 raise BuildError(f"multiple resources map to virtual path {target!r}")
-            try:
-                payload = resolved.read_bytes()
-            except OSError as exc:
-                raise BuildError(f"could not read matched resource: {resolved}") from exc
             records[target] = ResourceRecord(
                 source=resolved,
                 target=target,
