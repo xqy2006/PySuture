@@ -8,6 +8,7 @@ import stat
 import shutil
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -26,7 +27,20 @@ _ARCHIVE_ERRORS = (
     OSError,
     RuntimeError,
     UnicodeError,
+    zlib.error,
 )
+try:
+    from lzma import LZMAError as _LZMAError
+except ImportError:  # pragma: no cover - zipfile also treats lzma as optional
+    pass
+else:
+    _ARCHIVE_ERRORS += (_LZMAError,)
+try:
+    from compression.zstd import ZstdError as _ZstdError
+except ImportError:  # Python 3.11-3.13 do not provide stdlib Zstandard support
+    pass
+else:
+    _ARCHIVE_ERRORS += (_ZstdError,)
 _WINDOWS_RESERVED_NAMES = {
     "aux",
     "clock$",

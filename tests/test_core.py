@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import zlib
 from unittest import mock
 from dataclasses import replace
 from pathlib import Path
@@ -804,6 +805,16 @@ class CoreTests(unittest.TestCase):
         decode_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
         with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
             with mock.patch("pysuture.cache.ZipFile", side_effect=decode_error):
+                with self.assertRaisesRegex(LockError, "could not validate asset archive"):
+                    extract_asset(archive_path, digest)
+
+    def test_extract_asset_translates_compression_failure(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._archive_tree_manifest",
+                side_effect=zlib.error("corrupt compressed stream"),
+            ):
                 with self.assertRaisesRegex(LockError, "could not validate asset archive"):
                     extract_asset(archive_path, digest)
 
