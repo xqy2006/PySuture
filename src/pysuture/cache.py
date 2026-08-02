@@ -13,6 +13,26 @@ from zipfile import ZipFile
 from .errors import LockError
 
 
+def _latest_prerelease_asset_url(releases: object, asset_name: str) -> str:
+    if not isinstance(releases, list):
+        return ""
+    candidates: list[tuple[str, int, str]] = []
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") or not release.get("prerelease"):
+            continue
+        timestamp = str(release.get("published_at") or release.get("created_at") or "")
+        release_id = release.get("id")
+        numeric_id = release_id if isinstance(release_id, int) else 0
+        for asset in release.get("assets", []):
+            if not isinstance(asset, dict):
+                continue
+            asset_url = asset.get("browser_download_url")
+            if asset.get("name") == asset_name and isinstance(asset_url, str) and asset_url:
+                candidates.append((timestamp, numeric_id, asset_url))
+                break
+    return max(candidates, default=("", 0, ""))[2]
+
+
 def cache_root() -> Path:
     configured = os.environ.get("PYSUTURE_CACHE_DIR")
     if configured:
@@ -81,16 +101,7 @@ def fetch_index(url: str, *, offline: bool = False) -> tuple[bytes, Path]:
             if destination.is_file():
                 return destination.read_bytes(), destination
             raise LockError(f"could not resolve latest verified StaticPython prerelease: {exc}") from exc
-        resolved_url = ""
-        for release in releases if isinstance(releases, list) else []:
-            if release.get("draft") or not release.get("prerelease"):
-                continue
-            for asset in release.get("assets", []):
-                if asset.get("name") == asset_name and asset.get("browser_download_url"):
-                    resolved_url = asset["browser_download_url"]
-                    break
-            if resolved_url:
-                break
+        resolved_url = _latest_prerelease_asset_url(releases, asset_name)
         if not resolved_url:
             raise LockError(f"no verified prerelease asset named {asset_name!r} was found in {owner}/{repository}")
     request = Request(resolved_url, headers={"User-Agent": "PySuture/0.1 (+https://github.com/xqy2006/PySuture)"})
