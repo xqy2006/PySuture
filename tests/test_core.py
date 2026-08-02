@@ -22,7 +22,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from pysuture.analyzer import _private_package_modules, analyze_project
-from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES
+from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES, materialize_assets
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
@@ -44,10 +44,12 @@ from pysuture.lockfile import (
     write_lock,
 )
 from pysuture.resolver import (
+    ResolvedAsset,
     _solve_pack_dependencies,
     build_lock_payload,
     load_verified_index,
     resolve_assets,
+    validate_locked_asset_metadata,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
 )
@@ -275,6 +277,93 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
 
+    def test_locked_build_metadata_must_match_verified_assets(self) -> None:
+        self._write_project("import attrs\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        resolution = resolve_assets(config, report)
+        payload = build_lock_payload(config, report, resolution)
+
+        runtime_record = payload["runtime"]
+        validate_locked_asset_metadata(
+            runtime_record,
+            resolution.runtime.metadata,
+            owner="runtime SDK",
+        )
+        pack_record = payload["packs"][0]
+        pack_metadata = resolution.packs[0].metadata
+        validate_locked_asset_metadata(pack_record, pack_metadata, owner="pack attrs")
+
+        tampered_sources = {**pack_record, "sources": ["src/alternate.c"]}
+        with self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"):
+            validate_locked_asset_metadata(tampered_sources, pack_metadata, owner="pack attrs")
+
+        injected_optional_field = {**pack_record, "link_libraries": ["unlocked.lib"]}
+        with self.assertRaisesRegex(LockError, "pack attrs metadata differs.*link_libraries"):
+            validate_locked_asset_metadata(
+                injected_optional_field,
+                pack_metadata,
+                owner="pack attrs",
+            )
+
+        runtime_root = self.root / "runtime"
+        (runtime_root / "metadata").mkdir(parents=True)
+        (runtime_root / "metadata" / "runtime-sdk.v1.json").write_text(
+            json.dumps(resolution.runtime.metadata),
+            encoding="utf-8",
+        )
+        pack_root = self.root / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.json").write_text(
+            json.dumps(pack_metadata),
+            encoding="utf-8",
+        )
+        tampered_payload = json.loads(json.dumps(payload))
+        tampered_payload["packs"][0]["sources"] = ["src/alternate.c"]
+        with (
+            mock.patch(
+                "pysuture.builder.fetch_asset",
+                side_effect=[self.root / "runtime.zip", self.root / "attrs.zip"],
+            ),
+            mock.patch(
+                "pysuture.builder.extract_asset",
+                side_effect=[runtime_root, pack_root],
+            ),
+            self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"),
+        ):
+            materialize_assets(tampered_payload, offline=True)
+
+    def test_lock_metadata_projection_is_an_independent_snapshot(self) -> None:
+        first_metadata = {"sources": ["src/pack.c"], "license": {"status": "complete"}}
+        first = ResolvedAsset(
+            "first",
+            "1.0",
+            "first.zip",
+            "https://example.invalid/first.zip",
+            "1" * 64,
+            1,
+            first_metadata,
+        ).lock_record()
+        second = ResolvedAsset(
+            "second",
+            "1.0",
+            "second.zip",
+            "https://example.invalid/second.zip",
+            "2" * 64,
+            1,
+            {},
+        ).lock_record()
+
+        first_metadata["sources"].append("src/late.c")
+        first_metadata["license"]["status"] = "changed"
+        first["dependencies"].append("injected")
+        first["verification"]["status"] = "forged"
+
+        self.assertEqual(first["sources"], ["src/pack.c"])
+        self.assertEqual(first["license"], {"status": "complete"})
+        self.assertEqual(second["dependencies"], [])
+        self.assertEqual(second["verification"], {})
+
     def test_reviewed_catalog_resolves_exact_hashed_index(self) -> None:
         self._write_project("import attrs\n")
         reviewed_index = self._index()
@@ -424,6 +513,37 @@ class CoreTests(unittest.TestCase):
         pack = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
         pack["dependencies"] = ["missing"]
         with self.assertRaisesRegex(LockError, "dependencies are missing from the lock"):
+            validate_pack_runtime_compatibility(
+                runtime,
+                [("attrs", pack)],
+                staticpython_commit=index["staticpython_commit"],
+            )
+
+    def test_pack_runtime_contract_uses_link_compatible_toolchain_fields(self) -> None:
+        index = self._index()
+        runtime = index["runtimes"]["cp313"]["metadata"]
+        pack = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
+        runtime["toolchain"] = {
+            "visual_studio_version": "17.0",
+            "vscmd_version": "17.14.36",
+            "vc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0\\",
+            "platform_toolset": "v143",
+            "runtime_library": "MultiThreaded",
+        }
+        pack["toolchain"] = {
+            **runtime["toolchain"],
+            "vscmd_version": "17.14.37",
+            "windows_sdk_version": "10.0.26100.0",
+        }
+        validate_pack_runtime_compatibility(
+            runtime,
+            [("attrs", pack)],
+            staticpython_commit=index["staticpython_commit"],
+        )
+
+        pack["toolchain"]["vc_tools_version"] = "14.43.34808"
+        with self.assertRaisesRegex(LockError, "toolchain does not match.*vc_tools_version"):
             validate_pack_runtime_compatibility(
                 runtime,
                 [("attrs", pack)],
