@@ -1,4 +1,4 @@
-name: Verify StaticPython fbe500b candidate
+name: Verify StaticPython 7a1de96 candidate
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ jobs:
           from pathlib import Path
           from pysuture.cache import fetch_index
 
-          expected = "fbe500baa30232f4dbd95f7200dcb80e109eae83"
+          expected = "7a1de96b22d34aa19b0a852343f5080ee1532487"
           payload, _ = fetch_index("github+latest://xqy2006/StaticPython/runtime-index.v1.json")
           index = json.loads(payload)
           if index.get("staticpython_commit") != expected:
@@ -34,7 +34,7 @@ jobs:
           '@ | python -
       - uses: actions/upload-artifact@v4
         with:
-          name: staticpython-fbe500b-candidate-index
+          name: staticpython-7a1de96-candidate-index
           path: candidate-index.json
           if-no-files-found: error
 
@@ -54,7 +54,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          name: staticpython-fbe500b-candidate-index
+          name: staticpython-7a1de96-candidate-index
           path: candidate
       - name: Install build frontend
         run: python -m pip install -e ".[build]"
@@ -103,3 +103,25 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
+
+  reviewed-catalog:
+    needs: [candidate, e2e]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-7a1de96-candidate-index
+          path: candidate
+      - name: Create reviewed catalog pointer
+        run: >-
+          python .\scripts\update_runtime_catalog.py
+          --index .\candidate\candidate-index.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pysuture-reviewed-runtime-catalog-7a1de96
+          path: runtime-catalog.lock.json
+          if-no-files-found: error
