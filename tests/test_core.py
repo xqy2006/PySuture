@@ -579,6 +579,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("/Brepro", arguments)
         self.assertIn("/experimental:deterministic", arguments)
         self.assertIn("/Z7", arguments)
+        self.assertIn("/ZH:SHA_256", arguments)
         self.assertNotIn("/GL", arguments)
         self.assertTrue(any(item.startswith(f"/pathmap:{include_dir}=") for item in arguments))
         source_argument = next(item for item in arguments if item.endswith("probe.c"))
