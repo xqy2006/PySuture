@@ -190,6 +190,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(report.dynamic_gaps), 1)
         self.assertEqual(report.dynamic_gaps[0].module, "app")
 
+    def test_dynamic_import_aliases_and_relative_literals_are_reachable(self) -> None:
+        self._write_project(
+            "import importlib as loader\n"
+            "loader.import_module('pkg.alias_target')\n"
+            "import pkg\n"
+        )
+        (self.root / "pkg" / "alias_target.py").write_text(
+            "VALUE = 1\n",
+            encoding="utf-8",
+        )
+        (self.root / "pkg" / "__init__.py").write_text(
+            "from importlib import import_module as load\n"
+            "load('.helper', package=__package__)\n",
+            encoding="utf-8",
+        )
+        report = analyze_project(load_project_config(self.root))
+        self.assertIn("pkg.helper", report.reachable_modules)
+        self.assertIn("pkg.alias_target", report.reachable_modules)
+        self.assertIn("pkg.helper", report.dynamic_imports)
+        self.assertIn("pkg.alias_target", report.dynamic_imports)
+        self.assertEqual(report.dynamic_gaps, ())
+
+    def test_relative_dynamic_import_without_package_is_a_gap(self) -> None:
+        self._write_project("import importlib\nimportlib.import_module('.helper')\n")
+        report = analyze_project(load_project_config(self.root))
+        self.assertEqual(len(report.dynamic_gaps), 1)
+        self.assertEqual(report.dynamic_gaps[0].expression, "'.helper'")
+
     def test_explicit_dynamic_module_selects_its_pack(self) -> None:
         self._write_project("import importlib\nname = 'attrs'\nimportlib.import_module(name)\n")
         project_path = self.root / "pyproject.toml"
