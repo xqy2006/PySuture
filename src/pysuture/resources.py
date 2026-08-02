@@ -91,10 +91,32 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
 
 
 def write_resource_sources(records: list[ResourceRecord], source_dir: Path) -> list[dict]:
+    targets: dict[str, Path] = {}
+    for record in records:
+        target = _safe_target(record.target)
+        if target != record.target:
+            raise BuildError(f"resource target is not canonical: {record.target!r}")
+        if target in targets:
+            raise BuildError(
+                f"multiple resources map to virtual path {target!r}: "
+                f"{targets[target]} and {record.source}"
+            )
+        targets[target] = record.source
+
     source_dir.mkdir(parents=True, exist_ok=True)
     generated: list[dict] = []
     for index, record in enumerate(records, start=1):
-        payload = record.source.read_bytes()
+        try:
+            payload = record.source.read_bytes()
+        except OSError as exc:
+            raise BuildError(f"could not reread collected resource: {record.source}") from exc
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        if len(payload) != record.size or actual_sha256 != record.sha256.lower():
+            raise BuildError(
+                f"resource changed after collection: {record.source} "
+                f"(expected {record.size} bytes/{record.sha256.lower()}, "
+                f"got {len(payload)} bytes/{actual_sha256})"
+            )
         compressed = zlib.compress(payload, level=9)
         symbol = f"pysuture_resource_{index:06d}_{record.sha256[:16]}"
         values = [str(value) for value in compressed]
