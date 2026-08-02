@@ -918,6 +918,20 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "multiple resources map"):
             write_resource_sources(records, self.root / "generated")
 
+    def test_resource_embedding_rejects_absolute_or_control_targets(self) -> None:
+        source = self.root / "payload.bin"
+        source.write_bytes(b"payload")
+        for target in ("/assets/payload.bin", "assets/./payload.bin", "assets/bad\x00.bin"):
+            with self.subTest(target=target):
+                record = ResourceRecord(
+                    source=source,
+                    target=target,
+                    sha256=sha256_bytes(b"payload"),
+                    size=7,
+                )
+                with self.assertRaisesRegex(BuildError, "safe relative virtual path"):
+                    write_resource_sources([record], self.root / "generated")
+
     def test_resource_embedding_reports_removed_source(self) -> None:
         source = self.root / "removed.bin"
         source.write_bytes(b"present")
