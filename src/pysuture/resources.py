@@ -73,12 +73,26 @@ def _safe_target(value: str) -> str:
     return "/".join(parts)
 
 
-def _looks_secret(path: Path, payload: bytes) -> bool:
+def _looks_secret_name(path: Path) -> bool:
     name = path.name.casefold()
-    if (
+    return (
         name in SECRET_BASENAMES
         or path.suffix.casefold() in SECRET_SUFFIXES
         or any(pattern.fullmatch(name) for pattern in SECRET_NAME_PATTERNS)
+    )
+
+
+def _looks_secret(
+    path: Path,
+    payload: bytes,
+    *,
+    matched_path: Path | None = None,
+) -> bool:
+    # ``resolve()`` is needed for the project-root containment check, but it
+    # replaces a symlink's security-relevant basename with its target name.
+    # Inspect both names while scanning the payload only once.
+    if _looks_secret_name(path) or (
+        matched_path is not None and _looks_secret_name(matched_path)
     ):
         return True
     return any(marker in payload for marker in PRIVATE_KEY_MARKERS)
@@ -105,8 +119,8 @@ def collect_application_resources(config: ProjectConfig) -> tuple[list[ResourceR
                 payload = resolved.read_bytes()
             except OSError as exc:
                 raise BuildError(f"could not read matched resource: {resolved}") from exc
-            if _looks_secret(resolved, payload):
-                message = f"resource looks like a credential or private key: {resolved.relative_to(root)}"
+            if _looks_secret(resolved, payload, matched_path=path):
+                message = f"resource looks like a credential or private key: {path.relative_to(root)}"
                 if config.secret_policy == "error":
                     raise BuildError(message)
                 if config.secret_policy == "warn":
