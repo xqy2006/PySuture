@@ -23,10 +23,14 @@ _WINDOWS_RESERVED_NAMES = {
     "aux",
     "clock$",
     "con",
+    "conin$",
+    "conout$",
     "nul",
     "prn",
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
+    *(f"com{number}" for number in "¹²³"),
+    *(f"lpt{number}" for number in "¹²³"),
 }
 
 
@@ -200,7 +204,7 @@ def _validated_member_name(member: ZipInfo) -> tuple[tuple[str, ...], str, bool]
     for part in parts:
         reserved_stem = part.split(".", 1)[0].casefold()
         if (
-            ":" in part
+            any(ord(character) < 32 or character in '<>:"|?*' for character in part)
             or part.endswith((" ", "."))
             or reserved_stem in _WINDOWS_RESERVED_NAMES
         ):
@@ -496,9 +500,19 @@ def extract_asset(path: Path, sha256: str) -> Path:
             workspace = Path(tempfile.mkdtemp(prefix="pysuture-extract-", dir=destination.parent))
             staging = workspace / "payload"
             try:
-                _extract_validated_members(archive, staging, members)
+                try:
+                    _extract_validated_members(archive, staging, members)
+                except LockError:
+                    raise
+                except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+                    raise LockError(f"could not extract verified asset archive {path}: {exc}") from exc
                 _verify_open_archive_sha256(handle, expected_sha256)
-                verified_tree = _archive_tree_manifest(archive, members)
+                try:
+                    verified_tree = _archive_tree_manifest(archive, members)
+                except LockError:
+                    raise
+                except (BadZipFile, NotImplementedError, OSError, RuntimeError) as exc:
+                    raise LockError(f"could not revalidate asset archive {path}: {exc}") from exc
                 if verified_tree != tree:
                     raise LockError(f"asset archive contents changed during extraction: {path}")
                 if _tree_manifest(staging) != verified_tree:

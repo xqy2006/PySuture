@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 from dataclasses import replace
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -614,6 +614,22 @@ class CoreTests(unittest.TestCase):
             with self.assertRaisesRegex(LockError, "unsafe Windows path"):
                 _safe_extract(archive, self.root / "extract")
 
+    def test_zip_extraction_rejects_windows_invalid_character(self) -> None:
+        archive_path = self.root / "unsafe-windows-character.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("payload?.txt", "bad")
+        with ZipFile(archive_path) as archive:
+            with self.assertRaisesRegex(LockError, "unsafe Windows path"):
+                _safe_extract(archive, self.root / "extract")
+
+    def test_zip_extraction_rejects_extended_windows_device_name(self) -> None:
+        archive_path = self.root / "unsafe-windows-device.zip"
+        with ZipFile(archive_path, "w") as archive:
+            archive.writestr("COM¹.txt", "bad")
+        with ZipFile(archive_path) as archive:
+            with self.assertRaisesRegex(LockError, "unsafe Windows path"):
+                _safe_extract(archive, self.root / "extract")
+
     def test_extract_asset_reuses_valid_manifest(self) -> None:
         archive_path, digest = self._write_asset_archive(
             [("sdk/include/Python.h", "header"), ("sdk/libs/python.lib", b"library")]
@@ -740,6 +756,16 @@ class CoreTests(unittest.TestCase):
 
         destination = self.root / "cache" / "extracted" / digest
         self.assertFalse(destination.exists())
+
+    def test_extract_asset_translates_archive_read_failure(self) -> None:
+        archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
+        with mock.patch.dict(os.environ, {"PYSUTURE_CACHE_DIR": str(self.root / "cache")}):
+            with mock.patch(
+                "pysuture.cache._extract_validated_members",
+                side_effect=BadZipFile("archive changed"),
+            ):
+                with self.assertRaisesRegex(LockError, "could not extract verified asset"):
+                    extract_asset(archive_path, digest)
 
     def test_extract_asset_serializes_concurrent_initialization(self) -> None:
         archive_path, digest = self._write_asset_archive([("payload/data.bin", b"verified")])
