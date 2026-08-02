@@ -921,7 +921,14 @@ class CoreTests(unittest.TestCase):
     def test_resource_embedding_rejects_absolute_or_control_targets(self) -> None:
         source = self.root / "payload.bin"
         source.write_bytes(b"payload")
-        for target in ("/assets/payload.bin", "assets/./payload.bin", "assets/bad\x00.bin"):
+        for target in (
+            "/assets/payload.bin",
+            "C:/assets/payload.bin",
+            r"C:\assets\payload.bin",
+            "C:drive-relative.bin",
+            "assets/./payload.bin",
+            "assets/bad\x00.bin",
+        ):
             with self.subTest(target=target):
                 record = ResourceRecord(
                     source=source,

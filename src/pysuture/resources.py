@@ -6,7 +6,7 @@ import os
 import re
 import zlib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .config import ProjectConfig
 from .constants import SECRET_BASENAMES, SECRET_SUFFIXES
@@ -38,6 +38,7 @@ def _safe_target(value: str) -> str:
     if (
         not normalized
         or path.is_absolute()
+        or bool(PureWindowsPath(normalized).drive)
         or any(part in {"", ".", ".."} for part in parts)
         or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
     ):
