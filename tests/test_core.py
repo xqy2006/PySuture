@@ -548,6 +548,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("run 'pysuture lock --update'", stderr.getvalue())
 
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cli_main(
+                ["build", "--root", str(self.root), "--python", "3.14", "--offline"]
+            )
+        self.assertEqual(result, 2)
+        self.assertIn("run 'pysuture lock --update'", stderr.getvalue())
+
     def test_frozen_build_requires_preexisting_lock(self) -> None:
         self._write_project("pass\n")
         stderr = io.StringIO()
