@@ -40,6 +40,7 @@ from pysuture.config import DataMapping, initialize_project, load_project_config
 from pysuture.cythonizer import (
     _ensure_freeze_support_prelude,
     _freeze_support_bindings,
+    _is_main_guard,
     _no_argument_call,
     _prepare_module_source,
     cythonize_modules,
@@ -1412,6 +1413,58 @@ class CoreTests(unittest.TestCase):
                 if (call := _no_argument_call(statement)) is not None
             )
         )
+
+    def test_custom_freeze_support_rebindings_are_not_removed(self) -> None:
+        sources = (
+            "import multiprocessing\n"
+            "multiprocessing.freeze_support = application_hook\n"
+            "if __name__ == '__main__':\n"
+            "    multiprocessing.freeze_support()\n",
+            "from multiprocessing import freeze_support\n"
+            "if use_application_hook:\n"
+            "    freeze_support = application_hook\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support()\n",
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if use_application_hook:\n"
+            "        mp.freeze_support = application_hook\n"
+            "    mp.freeze_support()\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                guard_index = next(
+                    index
+                    for index, statement in enumerate(tree.body)
+                    if isinstance(statement, ast.If) and _is_main_guard(statement.test)
+                )
+                guard = tree.body[guard_index]
+                self.assertIsInstance(guard, ast.If)
+                direct_names, module_names = _freeze_support_bindings(
+                    tree.body[:guard_index]
+                )
+                _ensure_freeze_support_prelude(
+                    guard,
+                    direct_names=direct_names,
+                    module_names=module_names,
+                )
+                self.assertTrue(
+                    any(
+                        (
+                            isinstance(call.func, ast.Name)
+                            and call.func.id == "freeze_support"
+                        )
+                        or (
+                            isinstance(call.func, ast.Attribute)
+                            and call.func.attr == "freeze_support"
+                            and isinstance(call.func.value, ast.Name)
+                            and call.func.value.id in {"multiprocessing", "mp"}
+                        )
+                        for statement in guard.body
+                        if (call := _no_argument_call(statement)) is not None
+                    )
+                )
 
     def test_unverified_bare_freeze_support_call_gets_canonical_prelude(self) -> None:
         guard = ast.If(

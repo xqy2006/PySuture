@@ -113,39 +113,105 @@ if (
     ).body
 
 
-def _target_names(target: ast.expr) -> set[str]:
-    if isinstance(target, ast.Name):
-        return {target.id}
-    if isinstance(target, (ast.List, ast.Tuple)):
-        return {name for item in target.elts for name in _target_names(item)}
-    if isinstance(target, ast.Starred):
-        return _target_names(target.value)
-    return set()
+class _CurrentScopeBindingVisitor(ast.NodeVisitor):
+    """Collect names that a statement may replace in the current scope."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if (
+            node.attr == "freeze_support"
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and isinstance(node.value, ast.Name)
+        ):
+            # Mutating the imported module's function makes a later attribute
+            # call application-defined, so it is no longer safe to remove.
+            self.names.add(node.value.id)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.names.update(
+            alias.asname or alias.name.partition(".")[0]
+            for alias in node.names
+        )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self.names.update(
+            alias.asname or alias.name
+            for alias in node.names
+            if alias.name != "*"
+        )
+
+    def _visit_function_definition(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        self.names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        if node.returns is not None:
+            self.visit(node.returns)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function_definition(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+        for type_parameter in getattr(node, "type_params", ()):
+            self.visit(type_parameter)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        if node.type is not None:
+            self.visit(node.type)
+        for child in node.body:
+            self.visit(child)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        if node.pattern is not None:
+            self.visit(node.pattern)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest is not None:
+            self.names.add(node.rest)
+        self.generic_visit(node)
 
 
 def _statement_bound_names(statement: ast.stmt) -> set[str]:
-    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return {statement.name}
-    if isinstance(statement, ast.Import):
-        return {alias.asname or alias.name.partition(".")[0] for alias in statement.names}
-    if isinstance(statement, ast.ImportFrom):
-        return {alias.asname or alias.name for alias in statement.names if alias.name != "*"}
-    if isinstance(statement, ast.Assign):
-        return {name for target in statement.targets for name in _target_names(target)}
-    if isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
-        return _target_names(statement.target)
-    if isinstance(statement, (ast.For, ast.AsyncFor)):
-        return _target_names(statement.target)
-    if isinstance(statement, (ast.With, ast.AsyncWith)):
-        return {
-            name
-            for item in statement.items
-            if item.optional_vars is not None
-            for name in _target_names(item.optional_vars)
-        }
-    if isinstance(statement, ast.Delete):
-        return {name for target in statement.targets for name in _target_names(target)}
-    return set()
+    visitor = _CurrentScopeBindingVisitor()
+    visitor.visit(statement)
+    return visitor.names
 
 
 def _update_freeze_support_bindings(
