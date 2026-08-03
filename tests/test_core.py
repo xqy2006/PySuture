@@ -443,6 +443,57 @@ class CoreTests(unittest.TestCase):
         ):
             materialize_assets(tampered_payload, offline=True)
 
+    def test_trusted_object_origin_survives_index_lock_and_archive_materialization(
+        self,
+    ) -> None:
+        index = self._index()
+        pack_metadata = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
+        pack_metadata["libraries"] = ["wxbase32u.lib"]
+        pack_metadata["trusted_object_origins"] = [
+            {"library": "wxbase32u.lib", "object": "main.obj"},
+        ]
+        self._write_project("import attrs\n", index=index)
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        resolution = resolve_assets(config, report)
+        payload = build_lock_payload(config, report, resolution)
+        origin = [{"library": "wxbase32u.lib", "object": "main.obj"}]
+        self.assertEqual(payload["packs"][0]["trusted_object_origins"], origin)
+
+        runtime_root = self.root / "runtime"
+        (runtime_root / "metadata").mkdir(parents=True)
+        (runtime_root / "metadata" / "runtime-sdk.v1.json").write_text(
+            json.dumps(resolution.runtime.metadata),
+            encoding="utf-8",
+        )
+        pack_root = self.root / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.json").write_text(
+            json.dumps(resolution.packs[0].metadata),
+            encoding="utf-8",
+        )
+        with (
+            mock.patch(
+                "pysuture.builder.fetch_asset",
+                side_effect=[self.root / "runtime.zip", self.root / "attrs.zip"],
+            ),
+            mock.patch(
+                "pysuture.builder.extract_asset",
+                side_effect=[runtime_root, pack_root],
+            ),
+        ):
+            assets = materialize_assets(payload, offline=True)
+        self.assertEqual(assets.packs[0][2]["trusted_object_origins"], origin)
+
+        missing_origin = json.loads(json.dumps(payload["packs"][0]))
+        del missing_origin["trusted_object_origins"]
+        with self.assertRaisesRegex(LockError, "metadata differs.*trusted_object_origins"):
+            validate_locked_asset_metadata(
+                missing_origin,
+                resolution.packs[0].metadata,
+                owner="pack attrs",
+            )
+
     def test_lock_metadata_projection_is_an_independent_snapshot(self) -> None:
         first_metadata = {"sources": ["src/pack.c"], "license": {"status": "complete"}}
         first = ResolvedAsset(
