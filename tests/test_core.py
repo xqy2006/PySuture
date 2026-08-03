@@ -30,6 +30,7 @@ from pysuture.analyzer import (
 )
 from pysuture.builder import (
     REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _command_path,
     _compile_source,
     materialize_assets,
 )
@@ -590,6 +591,28 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(Path(include_argument).is_absolute())
         self.assertEqual(captured["cwd"], build_dir)
         self.assertFalse(Path(captured["command"][1].removeprefix("@")).is_absolute())
+
+    @unittest.skipUnless(os.name == "nt", "MSVC command paths are Windows-specific")
+    def test_msvc_command_path_avoids_unresolved_legacy_path_limit(self) -> None:
+        source = (
+            self.root
+            / "shared-cache"
+            / "extracted"
+            / ("a" * 64)
+            / "src"
+            / "resources"
+            / "resource_000001.c"
+        ).resolve()
+        build_dir = self.root / "nested" / "project" / ".pysuture" / "build" / "stable-id"
+        while len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))) < 260:
+            build_dir = build_dir.parent / "deeper-location" / build_dir.name
+
+        self.assertLess(len(str(source)), 260)
+        self.assertGreaterEqual(
+            len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))),
+            260,
+        )
+        self.assertEqual(_command_path(source, build_dir), str(source))
 
     def test_doctor_distinguishes_missing_and_malformed_lock(self) -> None:
         toolchain = MSVCToolchain(
