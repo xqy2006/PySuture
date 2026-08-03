@@ -251,10 +251,43 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
     return sorted(set(names), key=str.casefold)
 
 
+def _classify_main_object_records(
+    map_text: str,
+    trusted_object_origins: set[tuple[str, str]],
+) -> tuple[list[str], list[str]]:
+    records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_archive_patterns = [
+        re.compile(
+            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(library).name[:-4])}"
+            rf"(?:\.lib)?[:(]{re.escape(object_name)}(?:\)|(?=\s|$))"
+        )
+        for library, object_name in trusted_object_origins
+        if (
+            isinstance(library, str)
+            and library.casefold().endswith(".lib")
+            and isinstance(object_name, str)
+            and object_name.casefold() == "main.obj"
+        )
+    ]
+    allowed = []
+    forbidden = []
+    for record in records:
+        normalized_record = record.casefold()
+        destination = (
+            allowed
+            if any(pattern.search(normalized_record) for pattern in allowed_archive_patterns)
+            else forbidden
+        )
+        destination.append(record)
+    return allowed, forbidden
+
+
 def audit_executable(
     executable: Path,
     map_path: Path,
     toolchain: MSVCToolchain,
+    *,
+    trusted_object_origins: set[tuple[str, str]] | None = None,
 ) -> dict:
     dependents = _run(
         [str(toolchain.dumpbin), "/NOLOGO", "/DEPENDENTS", str(executable)],
@@ -279,14 +312,18 @@ def audit_executable(
         symbol for symbol in FORBIDDEN_ENTRY_SYMBOLS
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", map_text)
     ]
-    main_objects = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
+    allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
+        map_text,
+        trusted_object_origins or set(),
+    )
     report = {
         "status": "passed",
         "dependencies": dependencies,
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "main_object_records": main_objects,
+        "allowed_trusted_object_records": allowed_main_objects,
+        "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
     }
     failures = []
@@ -296,8 +333,9 @@ def audit_executable(
         failures.append("non-system DLLs: " + ", ".join(non_system_dependencies))
     if forbidden_symbols:
         failures.append("generic Python entry symbols: " + ", ".join(forbidden_symbols))
-    if main_objects:
-        failures.append("main.obj was linked")
+    if forbidden_main_objects:
+        origins = [" ".join(record.split())[:300] for record in forbidden_main_objects[:5]]
+        failures.append("forbidden main.obj records: " + " | ".join(origins))
     if failures:
         report["status"] = "failed"
         raise BuildError("PE audit failed: " + "; ".join(failures))
@@ -377,6 +415,7 @@ def build_executable(
     pack_libraries_by_name: dict[str, tuple[Path, str]] = {}
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
+    trusted_object_origins: set[tuple[str, str]] = set()
     for locked_record, pack_root, metadata in assets.packs:
         symbol = metadata.get("descriptor_symbol")
         if not isinstance(symbol, str) or not symbol:
@@ -406,6 +445,10 @@ def build_executable(
                 raise BuildError(f"pack {locked_record['name']} wholearchive library is missing: {library_name}")
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
+        trusted_object_origins.update(
+            (record["library"], record["object"])
+            for record in metadata.get("trusted_object_origins", [])
+        )
 
     wholearchive_paths = list(dict.fromkeys(wholearchive_paths))
 
@@ -518,7 +561,12 @@ def build_executable(
     )
     if not executable.is_file():
         raise BuildError("linker did not produce the executable")
-    audit = audit_executable(executable, map_path, toolchain)
+    audit = audit_executable(
+        executable,
+        map_path,
+        toolchain,
+        trusted_object_origins=trusted_object_origins,
+    )
     dist_dir = config.root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
     destination = dist_dir / executable.name

@@ -30,6 +30,7 @@ from pysuture.analyzer import (
 )
 from pysuture.builder import (
     REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _classify_main_object_records,
     _command_path,
     _compile_source,
     _stage_link_libraries,
@@ -100,6 +101,41 @@ class CoreTests(unittest.TestCase):
 
     def test_windows_link_baseline_includes_security_apis(self) -> None:
         self.assertIn("advapi32.lib", REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
+
+    def test_main_object_audit_allows_only_explicit_library_object_origins(self) -> None:
+        allowed, forbidden = _classify_main_object_records(
+            "\n".join(
+                [
+                    "0001:00000000 wxEntry wxbase32u.lib(main.obj)",
+                    "0001:00000008 wxEntryCleanup wxbase32u:main.obj",
+                    "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                    r"0001:00000020 custom_entry C:\build\main.obj",
+                    "0001:00000030 impostor notwxbase32u:main.obj",
+                    "0001:00000038 undeclared other.lib(main.obj)",
+                    "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
+                    "0001:00000048 suffix wxbase32u:main.obj-extra",
+                ]
+            ),
+            {("wxbase32u.lib", "main.obj")},
+        )
+        self.assertEqual(
+            allowed,
+            [
+                "0001:00000000 wxEntry wxbase32u.lib(main.obj)",
+                "0001:00000008 wxEntryCleanup wxbase32u:main.obj",
+            ],
+        )
+        self.assertEqual(
+            forbidden,
+            [
+                "0001:00000010 Py_Main pythoncore.lib(main.obj)",
+                r"0001:00000020 custom_entry C:\build\main.obj",
+                "0001:00000030 impostor notwxbase32u:main.obj",
+                "0001:00000038 undeclared other.lib(main.obj)",
+                "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
+                "0001:00000048 suffix wxbase32u:main.obj-extra",
+            ],
+        )
 
     def test_latest_prerelease_asset_uses_publication_time_not_api_order(self) -> None:
         releases = [
@@ -204,6 +240,7 @@ class CoreTests(unittest.TestCase):
             "dependencies": [],
             "dependency_constraints": {},
             "conflicts": [],
+            "trusted_object_origins": [],
             "descriptor_symbol": "StaticPython_Pack_attrs",
             "libraries": [],
             "sources": ["src/pack.c"],
@@ -330,6 +367,7 @@ class CoreTests(unittest.TestCase):
         payload = build_lock_payload(config, report, resolution)
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
+        self.assertEqual(payload["packs"][0]["trusted_object_origins"], [])
 
     def test_resolver_accepts_reachable_local_namespace_without_pack(self) -> None:
         self._write_project("import ns\n")
@@ -399,6 +437,15 @@ class CoreTests(unittest.TestCase):
                 pack_metadata,
                 owner="pack attrs",
             )
+
+        injected_origin = {
+            **pack_record,
+            "trusted_object_origins": [
+                {"library": "attrs.lib", "object": "main.obj"},
+            ],
+        }
+        with self.assertRaisesRegex(LockError, "metadata differs.*trusted_object_origins"):
+            validate_locked_asset_metadata(injected_origin, pack_metadata, owner="pack attrs")
 
         runtime_root = self.root / "runtime"
         (runtime_root / "metadata").mkdir(parents=True)
@@ -783,6 +830,39 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(LockError, "frozen module.*conflicts"):
             validate_pack_composition(runtime, [("first", first), ("second", second)])
 
+    def test_pack_composition_requires_exact_owned_trusted_object_origin(self) -> None:
+        runtime = {
+            "link_libraries": [],
+            "frozen_module_names": [],
+            "builtin_module_registrations": [],
+        }
+        pack = {
+            "descriptor_symbol": "StaticPython_Pack_wxpython",
+            "libraries": ["wxbase32u.lib"],
+            "trusted_object_origins": [
+                {"library": "wxbase32u.lib", "object": "main.obj"},
+            ],
+            "frozen_modules": [],
+            "builtin_modules": [],
+            "resources": [],
+        }
+        validate_pack_composition(runtime, [("wxpython", pack)])
+
+        invalid_records = (
+            [{"library": "outside.lib", "object": "main.obj"}],
+            [{"library": "../wxbase32u.lib", "object": "main.obj"}],
+            [{"library": "wxbase32u.lib", "object": "other.obj"}],
+            [{"library": "wxbase32u.lib", "object": "main.obj", "extra": True}],
+        )
+        for value in invalid_records:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                LockError,
+                "trusted object",
+            ):
+                validate_pack_composition(
+                    runtime,
+                    [("wxpython", {**pack, "trusted_object_origins": value})],
+                )
     def test_pack_runtime_contract_rejects_missing_locked_dependency(self) -> None:
         index = self._index()
         runtime = index["runtimes"]["cp313"]["metadata"]
