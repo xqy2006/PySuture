@@ -327,7 +327,13 @@ class CoreTests(unittest.TestCase):
 
         self.assertIn("ns", report.external_imports)
         self.assertIn("ns", report.namespace_packages)
-        self.assertEqual(resolve_assets(config, report).packs, ())
+        resolution = resolve_assets(config, report)
+        self.assertEqual(resolution.packs, ())
+        _validate_locked_imports(
+            build_lock_payload(config, report, resolution),
+            report,
+            config,
+        )
 
     def test_resolver_prefers_regular_pack_over_local_namespace_portion(self) -> None:
         index = self._index()
@@ -347,6 +353,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(
             [(pack.name, pack.version) for pack in resolution.packs],
             [("ns-regular", "25.3.0")],
+        )
+        _validate_locked_imports(
+            build_lock_payload(config, report, resolution),
+            report,
+            config,
         )
 
     def test_locked_build_metadata_must_match_verified_assets(self) -> None:
