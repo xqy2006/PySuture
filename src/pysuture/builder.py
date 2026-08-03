@@ -126,11 +126,19 @@ def _write_response(path: Path, arguments: list[str]) -> Path:
 
 
 def _command_path(path: Path, cwd: Path) -> str:
+    absolute = os.path.abspath(path)
     try:
-        return os.path.relpath(path, cwd)
+        relative = os.path.relpath(absolute, cwd)
     except ValueError:
         # Windows cannot express a relative path across drive letters.
-        return str(path)
+        return absolute
+    if os.name == "nt" and len(os.path.join(str(cwd), relative)) >= 260:
+        # cl.exe can reject an otherwise valid relative input before collapsing
+        # its ``..`` components when the unresolved spelling reaches MAX_PATH.
+        # The normalized absolute path can be substantially shorter; /pathmap
+        # still removes it from deterministic debug records.
+        return absolute
+    return relative
 
 
 def _run(command: list[str], *, environment: dict[str, str], cwd: Path, label: str) -> str:
