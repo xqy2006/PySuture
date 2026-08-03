@@ -320,6 +320,35 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
 
+    def test_resolver_accepts_reachable_local_namespace_without_pack(self) -> None:
+        self._write_project("import ns\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+
+        self.assertIn("ns", report.external_imports)
+        self.assertIn("ns", report.namespace_packages)
+        self.assertEqual(resolve_assets(config, report).packs, ())
+
+    def test_resolver_prefers_regular_pack_over_local_namespace_portion(self) -> None:
+        index = self._index()
+        attrs = index["packs"]["attrs"].pop("25.3.0")
+        attrs["cp313"]["metadata"] = {
+            **attrs["cp313"]["metadata"],
+            "name": "ns-regular",
+            "top_level_import_names": ["ns"],
+            "descriptor_symbol": "StaticPython_Pack_ns_regular",
+        }
+        index["packs"] = {"ns-regular": {"25.3.0": attrs}}
+        self._write_project("import ns\n", index=index)
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+
+        resolution = resolve_assets(config, report)
+        self.assertEqual(
+            [(pack.name, pack.version) for pack in resolution.packs],
+            [("ns-regular", "25.3.0")],
+        )
+
     def test_locked_build_metadata_must_match_verified_assets(self) -> None:
         self._write_project("import attrs\n")
         config = load_project_config(self.root)

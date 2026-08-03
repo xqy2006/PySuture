@@ -545,6 +545,10 @@ def resolve_assets(
         raise LockError(f"runtime SDK ABI mismatch: expected {expected_runtime_abi}")
 
     top_level = _top_level_map(index, abi)
+    local_namespace_roots = {
+        name.split(".", 1)[0]
+        for name in report.namespace_packages
+    }
     requested: dict[str, str] = dict(config.packages)
     unresolved: set[str] = set()
     for import_name in report.external_imports:
@@ -552,7 +556,10 @@ def resolve_assets(
             continue
         providers = top_level.get(import_name, set())
         if not providers:
-            if import_name not in config.include_packages:
+            if (
+                import_name not in config.include_packages
+                and import_name not in local_namespace_roots
+            ):
                 unresolved.add(import_name)
             continue
         explicitly_requested = [name for name in providers if name in requested]
