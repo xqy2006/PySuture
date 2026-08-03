@@ -47,6 +47,7 @@ LOCKED_METADATA_OPTIONAL_FIELDS = (
     "link_libraries",
     "stdlib_top_level_import_names",
     "builtin_module_names",
+    "trusted_object_origins",
 )
 
 # VsDevCmd's own version can change independently of the compiler and linker.
@@ -80,6 +81,43 @@ def _validate_plain_library_names(value: object, *, owner: str, field: str) -> l
         seen.add(key)
         names.append(name)
     return names
+
+
+def _validate_trusted_object_origins(
+    value: object,
+    *,
+    owner: str,
+    native_libraries: list[str],
+) -> list[tuple[str, str]]:
+    if not isinstance(value, list):
+        raise LockError(f"{owner} trusted_object_origins must be a list")
+    owned = {name.casefold(): name for name in native_libraries}
+    origins: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in value:
+        if not isinstance(record, dict) or set(record) != {"library", "object"}:
+            raise LockError(
+                f"{owner} trusted object origins must contain only library and object"
+            )
+        library = record.get("library")
+        object_name = record.get("object")
+        if not isinstance(library, str) or PLAIN_LIBRARY_NAME_PATTERN.fullmatch(library) is None:
+            raise LockError(f"{owner} trusted object library must be a plain .lib basename")
+        owned_library = owned.get(library.casefold())
+        if owned_library is None:
+            raise LockError(f"{owner} trusted object library is missing from libraries: {library}")
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise LockError(
+                f"{owner} trusted object must currently be the exact basename main.obj"
+            )
+        key = (owned_library.casefold(), "main.obj")
+        if key in seen:
+            raise LockError(
+                f"{owner} trusted_object_origins contains duplicate origin {owned_library}(main.obj)"
+            )
+        seen.add(key)
+        origins.append((owned_library, "main.obj"))
+    return origins
 
 
 def _locked_metadata_projection(metadata: dict) -> dict:
@@ -411,6 +449,11 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
             field="wholearchive",
         )
         native_library_names = {name.casefold() for name in native_libraries}
+        _validate_trusted_object_origins(
+            metadata.get("trusted_object_origins", []),
+            owner=f"pack {owner}",
+            native_libraries=native_libraries,
+        )
         missing_wholearchive = [
             name for name in wholearchive if name.casefold() not in native_library_names
         ]

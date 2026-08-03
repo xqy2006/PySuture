@@ -231,15 +231,21 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
 
 def _classify_main_object_records(
     map_text: str,
-    allowed_pack_libraries: set[str],
+    trusted_object_origins: set[tuple[str, str]],
 ) -> tuple[list[str], list[str]]:
     records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
     allowed_archive_patterns = [
         re.compile(
-            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(name).name[:-4])}(?:\.lib)?[:(]main\.obj(?:\)|\b)"
+            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(library).name[:-4])}"
+            rf"(?:\.lib)?[:(]{re.escape(object_name)}(?:\)|(?=\s|$))"
         )
-        for name in allowed_pack_libraries
-        if isinstance(name, str) and name.lower().endswith(".lib")
+        for library, object_name in trusted_object_origins
+        if (
+            isinstance(library, str)
+            and library.casefold().endswith(".lib")
+            and isinstance(object_name, str)
+            and object_name.casefold() == "main.obj"
+        )
     ]
     allowed = []
     forbidden = []
@@ -259,7 +265,7 @@ def audit_executable(
     map_path: Path,
     toolchain: MSVCToolchain,
     *,
-    allowed_pack_libraries: set[str] | None = None,
+    trusted_object_origins: set[tuple[str, str]] | None = None,
 ) -> dict:
     dependents = _run(
         [str(toolchain.dumpbin), "/NOLOGO", "/DEPENDENTS", str(executable)],
@@ -286,7 +292,7 @@ def audit_executable(
     ]
     allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
         map_text,
-        allowed_pack_libraries or set(),
+        trusted_object_origins or set(),
     )
     report = {
         "status": "passed",
@@ -294,7 +300,7 @@ def audit_executable(
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "allowed_pack_main_object_records": allowed_main_objects,
+        "allowed_trusted_object_records": allowed_main_objects,
         "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
     }
@@ -388,6 +394,7 @@ def build_executable(
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
     suppressed_system_libraries: list[str] = []
+    trusted_object_origins: set[tuple[str, str]] = set()
     for locked_record, pack_root, metadata in assets.packs:
         symbol = metadata.get("descriptor_symbol")
         if not isinstance(symbol, str) or not symbol:
@@ -418,6 +425,10 @@ def build_executable(
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
         suppressed_system_libraries.extend(metadata.get("suppressed_system_libraries", []))
+        trusted_object_origins.update(
+            (record["library"], record["object"])
+            for record in metadata.get("trusted_object_origins", [])
+        )
 
     wholearchive_paths = list(dict.fromkeys(wholearchive_paths))
 
@@ -518,7 +529,7 @@ def build_executable(
         executable,
         map_path,
         toolchain,
-        allowed_pack_libraries={path.name for path in pack_libraries},
+        trusted_object_origins=trusted_object_origins,
     )
     dist_dir = config.root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)
