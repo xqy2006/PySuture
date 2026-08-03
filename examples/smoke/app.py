@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import multiprocessing
 import os
@@ -9,6 +10,10 @@ from pathlib import Path
 
 import attrs
 import regex
+import regular_pkg
+from regular_pkg import package_value
+import sibling_pkg
+from sibling_pkg import sibling_value
 
 
 @attrs.define(frozen=True)
@@ -55,6 +60,23 @@ def self_test() -> int:
     match = regex.fullmatch(r"\p{Letter}+", "路径中文")
     if match is None or match.group(0) != "路径中文":
         return 17
+    if (
+        list(regular_pkg.__path__) != []
+        or regular_pkg.__spec__ is None
+        or regular_pkg.__spec__.submodule_search_locations is not regular_pkg.__path__
+        or package_value() != "package-ok"
+        or list(sibling_pkg.__path__) != []
+        or sibling_pkg.__spec__ is None
+        or sibling_pkg.__spec__.submodule_search_locations is not sibling_pkg.__path__
+        or sibling_value() != "sibling-ok"
+    ):
+        return 18
+    try:
+        importlib.import_module("regular_pkg.injected")
+    except ModuleNotFoundError:
+        pass
+    else:
+        return 19
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))

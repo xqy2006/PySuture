@@ -107,7 +107,11 @@ jobs:
         run: |
           $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}"
           New-Item -ItemType Directory -Force $work | Out-Null
-          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-console.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $exe
+          $decoy = Join-Path $work "regular_pkg"
+          New-Item -ItemType Directory -Force $decoy | Out-Null
+          Set-Content -Path (Join-Path $decoy "injected.py") -Value "raise RuntimeError('external module loaded')" -Encoding utf8
           $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $env:TEMP = $work

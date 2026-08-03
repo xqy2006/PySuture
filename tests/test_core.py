@@ -1138,11 +1138,31 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((destination / "new.txt").exists())
 
     def test_cython_generates_unique_init_and_launcher_has_no_generic_entry(self) -> None:
-        self._write_project("if __name__ == '__main__':\n    print('ok')\n")
+        self._write_project("import pkg\nimport other_pkg\nif __name__ == '__main__':\n    print('ok')\n")
+        (self.root / "other_pkg").mkdir()
+        (self.root / "other_pkg" / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
         config = load_project_config(self.root)
         report = analyze_project(config)
         units, warnings = cythonize_modules(report, self.root / ".pysuture" / "test", installed_cython_version())
         self.assertTrue(all(unit.init_symbol.startswith("PyInit_pysuture_") for unit in units))
+        self.assertTrue(all("CYTHON_NO_PYINIT_EXPORT=1" in unit.compile_definitions for unit in units))
+        self.assertEqual(sum(unit.module.is_package for unit in units), 2)
+        package_units = [unit for unit in units if unit.module.is_package]
+        alias_targets: list[str] = []
+        for unit in package_units:
+            generated_text = unit.c_source.read_text(encoding="utf-8", errors="replace")
+            self.assertIn("PyInit___init__", generated_text)
+            alias_definitions = [
+                definition
+                for definition in unit.compile_definitions
+                if definition.startswith("PyInit___init__=")
+            ]
+            self.assertEqual(len(alias_definitions), 1)
+            alias_targets.append(alias_definitions[0].split("=", 1)[1])
+        self.assertEqual(len(alias_targets), len(set(alias_targets)))
+        self.assertTrue(
+            all(target.startswith("PyInit_pysuture_alias_") for target in alias_targets)
+        )
         launcher = write_launcher(
             self.root / ".pysuture" / "test" / "launcher.c",
             units=units,
@@ -1179,6 +1199,11 @@ class CoreTests(unittest.TestCase):
         prepared = next(unit.prepared_source for unit in units if unit.module.name == "app")
         prepared_text = prepared.read_text(encoding="utf-8")
         self.assertIn("freeze_support", prepared_text)
+        package_prepared = next(unit.prepared_source for unit in units if unit.module.name == "pkg")
+        package_text = package_prepared.read_text(encoding="utf-8")
+        self.assertIn("__path__ = []", package_text)
+        self.assertIn("__spec__.submodule_search_locations = __path__", package_text)
+        self.assertNotIn("__path__ = [__name__]", package_text)
 
     def test_freeze_support_is_prepended_before_guard_work(self) -> None:
         tree = ast.parse(
