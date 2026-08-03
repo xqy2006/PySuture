@@ -141,6 +141,29 @@ def _command_path(path: Path, cwd: Path) -> str:
     return relative
 
 
+def _stage_link_libraries(libraries: list[Path], build_dir: Path) -> list[Path]:
+    """Give immutable library inputs root-independent linker spellings."""
+    stage_root = build_dir / "link-libraries"
+    staged: list[Path] = []
+    for index, source in enumerate(libraries):
+        destination = stage_root / f"{index:04d}" / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            try:
+                if os.path.samefile(source, destination):
+                    staged.append(destination)
+                    continue
+            except OSError:
+                pass
+            destination.unlink()
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        staged.append(destination)
+    return staged
+
+
 def _run(command: list[str], *, environment: dict[str, str], cwd: Path, label: str) -> str:
     result = subprocess.run(
         command,
@@ -443,6 +466,20 @@ def build_executable(
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
     system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
 
+    original_link_libraries = [*pack_libraries, *runtime_libraries]
+    staged_link_libraries = _stage_link_libraries(original_link_libraries, build_dir)
+    staged_by_source = {
+        source.resolve(): staged
+        for source, staged in zip(original_link_libraries, staged_link_libraries, strict=True)
+    }
+    pack_library_count = len(pack_libraries)
+    staged_pack_libraries = staged_link_libraries[:pack_library_count]
+    staged_runtime_libraries = staged_link_libraries[pack_library_count:]
+    staged_wholearchive_paths = [
+        staged_by_source[path.resolve()]
+        for path in wholearchive_paths
+    ]
+
     executable = build_dir / f"{output_name}.exe"
     map_path = build_dir / f"{output_name}.map"
     pdb_path = build_dir / f"{output_name}.pdb"
@@ -464,9 +501,12 @@ def build_executable(
         "/Brepro",
         f"/SUBSYSTEM:{'WINDOWS' if selected_mode == 'windowed' else 'CONSOLE'}",
         *[_command_path(path, build_dir) for path in object_paths],
-        *[_command_path(path, build_dir) for path in pack_libraries],
-        *[_command_path(path, build_dir) for path in runtime_libraries],
-        *[f"/WHOLEARCHIVE:{_command_path(path, build_dir)}" for path in wholearchive_paths],
+        *[_command_path(path, build_dir) for path in staged_pack_libraries],
+        *[_command_path(path, build_dir) for path in staged_runtime_libraries],
+        *[
+            f"/WHOLEARCHIVE:{_command_path(path, build_dir)}"
+            for path in staged_wholearchive_paths
+        ],
         *system_libraries,
     ]
     link_response = _write_response(response_dir / "link.rsp", link_arguments)
