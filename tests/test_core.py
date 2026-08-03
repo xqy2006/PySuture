@@ -32,6 +32,7 @@ from pysuture.builder import (
     REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
     _command_path,
     _compile_source,
+    _stage_link_libraries,
     materialize_assets,
 )
 from pysuture.cache import (
@@ -591,6 +592,30 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(Path(include_argument).is_absolute())
         self.assertEqual(captured["cwd"], build_dir)
         self.assertFalse(Path(captured["command"][1].removeprefix("@")).is_absolute())
+
+    def test_link_libraries_are_staged_with_root_independent_paths(self) -> None:
+        libraries = []
+        for parent, payload in (("first", b"one"), ("second", b"two")):
+            source = self.root / "cache" / parent / "same-name.lib"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(payload)
+            libraries.append(source)
+
+        arguments = []
+        for project in ("short", "nested/longer/project"):
+            build_dir = self.root / project / ".pysuture" / "build" / "stable-id"
+            staged = _stage_link_libraries(libraries, build_dir)
+            arguments.append([_command_path(path, build_dir) for path in staged])
+            self.assertEqual([path.read_bytes() for path in staged], [b"one", b"two"])
+
+        self.assertEqual(arguments[0], arguments[1])
+        self.assertEqual(
+            arguments[0],
+            [
+                os.path.join("link-libraries", "0000", "same-name.lib"),
+                os.path.join("link-libraries", "0001", "same-name.lib"),
+            ],
+        )
 
     @unittest.skipUnless(os.name == "nt", "MSVC command paths are Windows-specific")
     def test_msvc_command_path_avoids_unresolved_legacy_path_limit(self) -> None:

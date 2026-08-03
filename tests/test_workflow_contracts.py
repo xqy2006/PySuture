@@ -58,6 +58,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("frozen build mutated pysuture.lock", script)
         self.assertIn("_assert_reports_match", script)
         self.assertIn("distribution directory must contain only", script)
+        self.assertIn("include-hidden-files: true", workflow)
 
 
 if __name__ == "__main__":

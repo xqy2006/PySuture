@@ -251,6 +251,7 @@ jobs:
             ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.map
             ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.rsp
           if-no-files-found: warn
+          include-hidden-files: true
 
   propose-update:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.propose_update }}
