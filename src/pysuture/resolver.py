@@ -337,6 +337,13 @@ def _is_stdlib(name: str, runtime_metadata: dict | None = None) -> bool:
     return name in sys.stdlib_module_names or name in WINDOWS_STDLIB_MODULES
 
 
+def _local_namespace_roots(report: AnalysisReport) -> set[str]:
+    return {
+        name.split(".", 1)[0]
+        for name in report.namespace_packages
+    }
+
+
 def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dict]]) -> None:
     claimed_frozen: dict[str, str] = {}
     claimed_builtins: dict[str, str] = {"_staticpython_resource_store": "runtime SDK"}
@@ -545,6 +552,7 @@ def resolve_assets(
         raise LockError(f"runtime SDK ABI mismatch: expected {expected_runtime_abi}")
 
     top_level = _top_level_map(index, abi)
+    local_namespace_roots = _local_namespace_roots(report)
     requested: dict[str, str] = dict(config.packages)
     unresolved: set[str] = set()
     for import_name in report.external_imports:
@@ -552,7 +560,10 @@ def resolve_assets(
             continue
         providers = top_level.get(import_name, set())
         if not providers:
-            if import_name not in config.include_packages:
+            if (
+                import_name not in config.include_packages
+                and import_name not in local_namespace_roots
+            ):
                 unresolved.add(import_name)
             continue
         explicitly_requested = [name for name in providers if name in requested]
