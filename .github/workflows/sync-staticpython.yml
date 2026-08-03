@@ -212,9 +212,50 @@ jobs:
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
 
+  determinism:
+    needs: candidate
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate
+      - name: Install locked build frontend
+        run: python -m pip install -e ".[build]"
+      - name: Build the same frozen lock below two roots
+        shell: pwsh
+        run: |
+          python .\scripts\check_frozen_lock_determinism.py `
+            --project .\examples\smoke `
+            --index .\candidate\candidate-index.json `
+            --python "3.13" `
+            --mode console `
+            --output pysuture-determinism `
+            --work-root "$env:RUNNER_TEMP\pysuture-frozen-lock-determinism" `
+            --keep
+      - name: Upload determinism diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-lock-determinism-diagnostics
+          path: |
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.rsp
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.rsp
+          if-no-files-found: warn
+          include-hidden-files: true
+
   propose-update:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.propose_update }}
-    needs: [candidate, e2e]
+    needs: [candidate, e2e, determinism]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4

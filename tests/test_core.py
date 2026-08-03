@@ -22,8 +22,19 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pysuture.analyzer import _private_package_modules, analyze_project
-from pysuture.builder import REQUIRED_WINDOWS_SYSTEM_LIBRARIES, materialize_assets
+from pysuture.analyzer import (
+    AnalysisReport,
+    ModuleRecord,
+    _private_package_modules,
+    analyze_project,
+)
+from pysuture.builder import (
+    REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
+    _command_path,
+    _compile_source,
+    _stage_link_libraries,
+    materialize_assets,
+)
 from pysuture.cache import (
     _cache_matches_manifest,
     _extract_validated_members,
@@ -521,6 +532,112 @@ class CoreTests(unittest.TestCase):
         expected["vc_tools_version"] = "14.43.34808"
         with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
             validate_locked_toolchain(expected, toolchain)
+
+    def test_msvc_compile_uses_reproducible_relative_inputs_without_ltcg(self) -> None:
+        project_root = self.root / "project"
+        build_dir = project_root / ".pysuture" / "build" / "stable-id"
+        source = project_root / "src" / "probe.c"
+        object_path = build_dir / "obj" / "probe.obj"
+        response_path = build_dir / "rsp" / "probe.rsp"
+        include_dir = self.root / "sdk" / "include"
+        source.parent.mkdir(parents=True)
+        object_path.parent.mkdir(parents=True)
+        include_dir.mkdir(parents=True)
+        source.write_text("int probe(void) { return 0; }\n", encoding="utf-8", newline="\n")
+        toolchain = MSVCToolchain(
+            installation_path=self.root,
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version="17.0",
+            vscmd_version="17.0",
+            vc_tools_version="14.40",
+            windows_sdk_version="10.0",
+        )
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            object_path.write_bytes(b"object")
+            return ""
+
+        with mock.patch("pysuture.builder._run", side_effect=fake_run):
+            _compile_source(
+                toolchain,
+                source,
+                object_path,
+                response_path,
+                [include_dir],
+                (),
+                project_root,
+                build_dir,
+            )
+
+        arguments = response_path.read_text(encoding="utf-16").splitlines()
+        self.assertIn("/Brepro", arguments)
+        self.assertIn("/experimental:deterministic", arguments)
+        self.assertIn("/Z7", arguments)
+        self.assertIn("/ZH:SHA_256", arguments)
+        self.assertNotIn("/GL", arguments)
+        self.assertTrue(any(item.startswith(f"/pathmap:{include_dir}=") for item in arguments))
+        source_argument = next(item for item in arguments if item.endswith("probe.c"))
+        object_argument = next(item.removeprefix("/Fo") for item in arguments if item.startswith("/Fo"))
+        include_argument = next(item.removeprefix("/I") for item in arguments if item.startswith("/I"))
+        self.assertFalse(Path(source_argument).is_absolute())
+        self.assertFalse(Path(object_argument).is_absolute())
+        self.assertFalse(Path(include_argument).is_absolute())
+        self.assertEqual(captured["cwd"], build_dir)
+        self.assertFalse(Path(captured["command"][1].removeprefix("@")).is_absolute())
+
+    def test_link_libraries_are_staged_with_root_independent_paths(self) -> None:
+        libraries = []
+        for parent, payload in (("first", b"one"), ("second", b"two")):
+            source = self.root / "cache" / parent / "same-name.lib"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(payload)
+            libraries.append(source)
+
+        arguments = []
+        for project in ("short", "nested/longer/project"):
+            build_dir = self.root / project / ".pysuture" / "build" / "stable-id"
+            staged = _stage_link_libraries(libraries, build_dir)
+            arguments.append([_command_path(path, build_dir) for path in staged])
+            self.assertEqual([path.read_bytes() for path in staged], [b"one", b"two"])
+
+        self.assertEqual(arguments[0], arguments[1])
+        self.assertEqual(
+            arguments[0],
+            [
+                os.path.join("link-libraries", "0000", "same-name.lib"),
+                os.path.join("link-libraries", "0001", "same-name.lib"),
+            ],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "MSVC command paths are Windows-specific")
+    def test_msvc_command_path_avoids_unresolved_legacy_path_limit(self) -> None:
+        source = (
+            self.root
+            / "shared-cache"
+            / "extracted"
+            / ("a" * 64)
+            / "src"
+            / "resources"
+            / "resource_000001.c"
+        ).resolve()
+        build_dir = self.root / "nested" / "project" / ".pysuture" / "build" / "stable-id"
+        while len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))) < 260:
+            build_dir = build_dir.parent / "deeper-location" / build_dir.name
+
+        self.assertLess(len(str(source)), 260)
+        self.assertGreaterEqual(
+            len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))),
+            260,
+        )
+        self.assertEqual(_command_path(source, build_dir), str(source))
 
     def test_doctor_distinguishes_missing_and_malformed_lock(self) -> None:
         toolchain = MSVCToolchain(
@@ -1625,6 +1742,32 @@ class CoreTests(unittest.TestCase):
         length = len(guard.body)
         _ensure_freeze_support_prelude(guard)
         self.assertEqual(len(guard.body), length)
+    def test_cython_output_is_independent_of_project_root(self) -> None:
+        generated = []
+        for location in ("first-location", "second-location"):
+            project_root = self.root / location / "project"
+            source_root = project_root / "src"
+            source_root.mkdir(parents=True)
+            source = source_root / "app.py"
+            source.write_text("VALUE = __file__\n", encoding="utf-8", newline="\n")
+            record = ModuleRecord("app", source, False, source_root)
+            report = AnalysisReport(
+                entry_module="app",
+                modules={"app": record},
+                reachable_modules=("app",),
+                namespace_packages=(),
+                import_graph={"app": ()},
+                external_imports=(),
+                dynamic_imports=(),
+                dynamic_gaps=(),
+            )
+            units, _warnings = cythonize_modules(
+                report,
+                project_root / ".pysuture" / "build" / "stable-id",
+                installed_cython_version(),
+            )
+            generated.append(units[0].c_source.read_bytes())
+        self.assertEqual(generated[0], generated[1])
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")
