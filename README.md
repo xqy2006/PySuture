@@ -55,8 +55,9 @@ an installed pure-Python dependency into the application-private module set;
 packages containing native extensions are rejected and need a StaticPython
 pack. Either declaration also acknowledges non-literal dynamic import sites;
 every concrete target must be listed because PySuture cannot infer values built
-at runtime. Data mappings create read-only virtual resources. `.env`, private-key,
-and credential-like files are rejected by default.
+at runtime. Data mappings create read-only virtual resources. `.env` variants,
+credential-like filenames, private-key formats, and embedded private-key PEM
+content are rejected by default.
 
 Entry files and `source-roots` must be relative paths contained by the project
 root. Module declarations use fully qualified Python names, and `output` is a
