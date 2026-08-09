@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download newest verified prerelease index
+      - name: Download exact or newest verified prerelease index
         env:
           EXPECTED_STATICPYTHON_COMMIT: ${{ github.event.client_payload.staticpython_commit || inputs.staticpython_commit }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,12 +48,22 @@ jobs:
           @'
           import json
           import os
+          import re
           from pathlib import Path
           from pysuture.cache import fetch_index
-          payload, _ = fetch_index("github+latest://xqy2006/StaticPython/runtime-index.v1.json")
           expected = os.environ.get("EXPECTED_STATICPYTHON_COMMIT", "").strip()
+          if expected:
+              if not re.fullmatch(r"[0-9a-f]{40}", expected):
+                  raise RuntimeError("expected StaticPython commit must be 40 lowercase hex characters")
+              source = (
+                  "https://github.com/xqy2006/StaticPython/releases/download/"
+                  f"staticpython-runtime-{expected[:12]}/runtime-index.v1.json"
+              )
+          else:
+              source = "github+latest://xqy2006/StaticPython/runtime-index.v1.json"
+          payload, _ = fetch_index(source)
           if expected and json.loads(payload)["staticpython_commit"] != expected:
-              raise RuntimeError("latest verified index does not match the dispatched StaticPython commit")
+              raise RuntimeError("immutable verified index does not match the dispatched StaticPython commit")
           Path("candidate-index.json").write_bytes(payload)
           '@ | python -
       - name: Read candidate metadata

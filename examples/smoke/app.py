@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import email
+import importlib.util
 import json
 import multiprocessing
 import os
@@ -9,6 +11,8 @@ from pathlib import Path
 
 import attrs
 import regex
+import smoke_ns
+from smoke_ns.child.probe import namespace_value
 
 
 @attrs.define(frozen=True)
@@ -55,6 +59,29 @@ def self_test() -> int:
     match = regex.fullmatch(r"\p{Letter}+", "路径中文")
     if match is None or match.group(0) != "路径中文":
         return 17
+    namespace_spec = importlib.util.find_spec("smoke_ns")
+    child_spec = importlib.util.find_spec("smoke_ns.child")
+    if (
+        namespace_spec is None
+        or namespace_spec.loader is None
+        or namespace_spec.loader is not smoke_ns.__loader__
+        or namespace_spec.submodule_search_locations is None
+        or namespace_spec.submodule_search_locations is not smoke_ns.__path__
+        or list(smoke_ns.__path__) != []
+        or child_spec is None
+        or child_spec.loader is None
+        or child_spec.loader is not smoke_ns.child.__loader__
+        or child_spec.submodule_search_locations is None
+        or child_spec.submodule_search_locations is not smoke_ns.child.__path__
+        or list(smoke_ns.child.__path__) != []
+        or smoke_ns.child is not sys.modules["smoke_ns.child"]
+        or namespace_value() != "namespace-ok"
+    ):
+        return 18
+    # ``email`` also has an application namespace portion under this source
+    # tree. Its regular frozen stdlib package must win over that portion.
+    if not callable(getattr(email, "message_from_string", None)):
+        return 19
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))

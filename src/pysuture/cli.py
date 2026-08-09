@@ -158,7 +158,7 @@ def command_lock(args: argparse.Namespace) -> int:
 
 
 def _validate_locked_imports(lock: dict, report: AnalysisReport, config: ProjectConfig) -> None:
-    from .resolver import _is_stdlib
+    from .resolver import _is_stdlib, _local_namespace_roots
 
     pack_records = lock.get("packs")
     if not isinstance(pack_records, list):
@@ -201,12 +201,14 @@ def _validate_locked_imports(lock: dict, report: AnalysisReport, config: Project
 
     missing: list[str] = []
     ambiguous: list[str] = []
+    local_namespace_roots = _local_namespace_roots(report)
     for name in report.external_imports:
         if _is_stdlib(name, lock.get("runtime", {})) or name in config.include_packages:
             continue
         matches = providers.get(name, set())
         if not matches:
-            missing.append(name)
+            if name not in local_namespace_roots:
+                missing.append(name)
         elif len(matches) > 1:
             owners = ", ".join(sorted(str(by_name[key]["name"]) for key in matches))
             ambiguous.append(f"{name} ({owners})")

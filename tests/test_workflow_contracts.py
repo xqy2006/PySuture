@@ -23,6 +23,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("staticpython_commit:", workflow)
         self.assertIn("inputs.staticpython_commit", workflow)
         self.assertIn("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}", workflow)
+        self.assertIn("staticpython-runtime-{expected[:12]}", workflow)
+        self.assertIn("if not re.fullmatch", workflow)
+        self.assertIn("immutable verified index does not match", workflow)
 
     def test_windowed_e2e_runs_full_unicode_multiprocessing_smoke(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
