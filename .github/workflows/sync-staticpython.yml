@@ -251,9 +251,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $PSNativeCommandUseErrorActionPreference = $false
-          if (-not (git status --porcelain)) {
+          git diff --quiet -- runtime-catalog.lock.json
+          $catalogDiffExit = $LASTEXITCODE
+          if ($catalogDiffExit -eq 0) {
             Write-Host "Catalog already points at this verified StaticPython commit"
             exit 0
+          }
+          if ($catalogDiffExit -ne 1) {
+            throw "Could not compare the reviewed catalog with master"
           }
           $branch = "sync/staticpython-${{ needs.candidate.outputs.short_commit }}"
           $existing = gh pr list --state open --head $branch --json url --jq '.[0].url'

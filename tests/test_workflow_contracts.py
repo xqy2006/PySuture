@@ -33,6 +33,9 @@ class WorkflowContractTests(unittest.TestCase):
         )
 
         self.assertIn("ref: master", workflow)
+        self.assertIn("git diff --quiet -- runtime-catalog.lock.json", workflow)
+        self.assertIn("$catalogDiffExit = $LASTEXITCODE", workflow)
+        self.assertNotIn("git status --porcelain", workflow)
         self.assertIn('git ls-remote --heads origin "refs/heads/$branch"', workflow)
         self.assertIn('git diff --name-only "origin/master...FETCH_HEAD"', workflow)
         self.assertIn("contains changes outside runtime-catalog.lock.json", workflow)
