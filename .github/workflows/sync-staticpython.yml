@@ -234,6 +234,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -248,20 +249,82 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
           if (-not (git status --porcelain)) {
             Write-Host "Catalog already points at this verified StaticPython commit"
             exit 0
           }
           $branch = "sync/staticpython-${{ needs.candidate.outputs.short_commit }}"
           $existing = gh pr list --state open --head $branch --json url --jq '.[0].url'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query existing StaticPython update pull requests"
+          }
           if (-not [string]::IsNullOrWhiteSpace($existing)) {
             Write-Host "An update PR already exists for this verified candidate: $existing"
             exit 0
           }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b $branch
-          git add runtime-catalog.lock.json
-          git commit -m "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}"
-          git push origin $branch
-          gh pr create --base master --head $branch --title "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}" --body "All five CPython targets and console/windowed representative applications passed. This PR only updates the reviewed catalog pointer; it does not auto-merge." --draft
+
+          $closed = gh pr list --state closed --head $branch --json url --jq '.[0].url'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query closed StaticPython update pull requests"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($closed)) {
+            Write-Warning "A closed update PR already records this verified candidate: $closed"
+            "### StaticPython catalog proposal`n`nA closed proposal already records this candidate: $closed" |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          $remoteLines = @(git ls-remote --heads origin "refs/heads/$branch")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query the StaticPython update branch"
+          }
+          $remoteLines = @($remoteLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($remoteLines.Count -gt 1) {
+            throw "Expected at most one remote StaticPython update branch, found $($remoteLines.Count)"
+          }
+
+          if ($remoteLines.Count -eq 1) {
+            git fetch --no-tags origin "refs/heads/$branch"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not fetch existing StaticPython update branch $branch"
+            }
+            $changedPaths = @(git diff --name-only "origin/master...FETCH_HEAD")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not audit existing StaticPython update branch $branch"
+            }
+            if ($changedPaths.Count -ne 1 -or $changedPaths[0] -ne "runtime-catalog.lock.json") {
+              throw "Existing update branch $branch contains changes outside runtime-catalog.lock.json"
+            }
+            git diff --quiet FETCH_HEAD -- runtime-catalog.lock.json
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing update branch $branch does not contain this exact verified catalog"
+            }
+            Write-Host "Verified existing orphan update branch $branch; retrying PR creation"
+          } else {
+            git config user.name "github-actions[bot]"
+            if ($LASTEXITCODE -ne 0) { throw "Could not configure the proposal author name" }
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ($LASTEXITCODE -ne 0) { throw "Could not configure the proposal author email" }
+            git checkout -b $branch
+            if ($LASTEXITCODE -ne 0) { throw "Could not create update branch $branch" }
+            git add runtime-catalog.lock.json
+            if ($LASTEXITCODE -ne 0) { throw "Could not stage the reviewed catalog" }
+            git commit -m "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}"
+            if ($LASTEXITCODE -ne 0) { throw "Could not commit the reviewed catalog" }
+            git push --set-upstream origin $branch
+            if ($LASTEXITCODE -ne 0) { throw "Could not publish update branch $branch" }
+          }
+
+          $proposal = gh pr create --base master --head $branch --title "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}" --body "All five CPython targets and console/windowed representative applications passed. This PR only updates the reviewed catalog pointer; it does not auto-merge." --draft 2>&1 | Out-String
+          $proposalExit = $LASTEXITCODE
+          if ($proposalExit -ne 0) {
+            $compareUrl = "https://github.com/${{ github.repository }}/compare/master...${branch}?expand=1"
+            Write-Warning "The verified update branch is published, but GitHub Actions could not create its draft PR. Create it from $compareUrl"
+            Write-Host $proposal.Trim()
+            "### StaticPython catalog proposal`n`nThe verified branch ``$branch`` is ready, but repository policy prevented Actions from creating its draft PR. [Create the draft PR manually]($compareUrl)." |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          Write-Host $proposal.Trim()
