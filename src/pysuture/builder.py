@@ -125,6 +125,45 @@ def _write_response(path: Path, arguments: list[str]) -> Path:
     return path
 
 
+def _command_path(path: Path, cwd: Path) -> str:
+    absolute = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(absolute, cwd)
+    except ValueError:
+        # Windows cannot express a relative path across drive letters.
+        return absolute
+    if os.name == "nt" and len(os.path.join(str(cwd), relative)) >= 260:
+        # cl.exe can reject an otherwise valid relative input before collapsing
+        # its ``..`` components when the unresolved spelling reaches MAX_PATH.
+        # The normalized absolute path can be substantially shorter; /pathmap
+        # still removes it from deterministic debug records.
+        return absolute
+    return relative
+
+
+def _stage_link_libraries(libraries: list[Path], build_dir: Path) -> list[Path]:
+    """Give immutable library inputs root-independent linker spellings."""
+    stage_root = build_dir / "link-libraries"
+    staged: list[Path] = []
+    for index, source in enumerate(libraries):
+        destination = stage_root / f"{index:04d}" / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            try:
+                if os.path.samefile(source, destination):
+                    staged.append(destination)
+                    continue
+            except OSError:
+                pass
+            destination.unlink()
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        staged.append(destination)
+    return staged
+
+
 def _run(command: list[str], *, environment: dict[str, str], cwd: Path, label: str) -> str:
     result = subprocess.run(
         command,
@@ -152,12 +191,14 @@ def _compile_source(
     project_root: Path,
     build_dir: Path,
 ) -> tuple[Path, str]:
+    source_argument = _command_path(source, build_dir)
+    object_argument = _command_path(object_path, build_dir)
+    response_argument = _command_path(response_path, build_dir)
     arguments = [
         "/nologo",
         "/c",
         "/O2",
         "/Ob2",
-        "/GL",
         "/Gy",
         "/Gw",
         "/MT",
@@ -166,17 +207,24 @@ def _compile_source(
         "/utf-8",
         "/bigobj",
         "/Brepro",
+        "/experimental:deterministic",
         "/Z7",
+        "/ZH:SHA_256",
+        f"/pathmap:{source.parent}=.pysuture/source",
         f"/pathmap:{project_root}=.",
         f"/pathmap:{build_dir}=.pysuture/build",
-        *[f"/I{directory}" for directory in include_dirs],
+        *[
+            f"/pathmap:{directory}=.pysuture/includes/{index:03d}"
+            for index, directory in enumerate(include_dirs)
+        ],
+        *[f"/I{_command_path(directory, build_dir)}" for directory in include_dirs],
         *[f"/D{definition}" for definition in definitions],
-        f"/Fo{object_path}",
-        str(source),
+        f"/Fo{object_argument}",
+        source_argument,
     ]
     _write_response(response_path, arguments)
     output = _run(
-        [str(toolchain.cl), f"@{response_path}"],
+        [str(toolchain.cl), f"@{response_argument}"],
         environment=toolchain.environment,
         cwd=build_dir,
         label=f"compile {source.name}",
@@ -389,9 +437,8 @@ def build_executable(
 
     def compile_job(job: tuple[Path, tuple[str, ...], str]):
         source, definitions, label = job
-        digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
-        object_path = object_dir / f"{label}-{digest}.obj"
-        response_path = response_dir / f"{label}-{digest}.rsp"
+        object_path = object_dir / f"{label}.obj"
+        response_path = response_dir / f"{label}.rsp"
         result_path, output_text = _compile_source(
             toolchain,
             source,
@@ -419,14 +466,28 @@ def build_executable(
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
     system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
 
+    original_link_libraries = [*pack_libraries, *runtime_libraries]
+    staged_link_libraries = _stage_link_libraries(original_link_libraries, build_dir)
+    staged_by_source = {
+        source.resolve(): staged
+        for source, staged in zip(original_link_libraries, staged_link_libraries, strict=True)
+    }
+    pack_library_count = len(pack_libraries)
+    staged_pack_libraries = staged_link_libraries[:pack_library_count]
+    staged_runtime_libraries = staged_link_libraries[pack_library_count:]
+    staged_wholearchive_paths = [
+        staged_by_source[path.resolve()]
+        for path in wholearchive_paths
+    ]
+
     executable = build_dir / f"{output_name}.exe"
     map_path = build_dir / f"{output_name}.map"
     pdb_path = build_dir / f"{output_name}.pdb"
     link_arguments = [
         "/NOLOGO",
-        f"/OUT:{executable}",
-        f"/MAP:{map_path}",
-        f"/PDB:{pdb_path}",
+        f"/OUT:{_command_path(executable, build_dir)}",
+        f"/MAP:{_command_path(map_path, build_dir)}",
+        f"/PDB:{_command_path(pdb_path, build_dir)}",
         "/PDBALTPATH:%_PDB%",
         "/DEBUG:FULL",
         "/LTCG",
@@ -439,15 +500,18 @@ def build_executable(
         "/HIGHENTROPYVA",
         "/Brepro",
         f"/SUBSYSTEM:{'WINDOWS' if selected_mode == 'windowed' else 'CONSOLE'}",
-        *[str(path) for path in object_paths],
-        *[str(path) for path in pack_libraries],
-        *[str(path) for path in runtime_libraries],
-        *[f"/WHOLEARCHIVE:{path}" for path in wholearchive_paths],
+        *[_command_path(path, build_dir) for path in object_paths],
+        *[_command_path(path, build_dir) for path in staged_pack_libraries],
+        *[_command_path(path, build_dir) for path in staged_runtime_libraries],
+        *[
+            f"/WHOLEARCHIVE:{_command_path(path, build_dir)}"
+            for path in staged_wholearchive_paths
+        ],
         *system_libraries,
     ]
     link_response = _write_response(response_dir / "link.rsp", link_arguments)
     link_log = _run(
-        [str(toolchain.link), f"@{link_response}"],
+        [str(toolchain.link), f"@{_command_path(link_response, build_dir)}"],
         environment=toolchain.environment,
         cwd=build_dir,
         label="link executable",
