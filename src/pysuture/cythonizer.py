@@ -13,6 +13,10 @@ from .errors import BuildError
 
 
 INIT_SYMBOL_RE = re.compile(r"\b(?:PyMODINIT_FUNC|__Pyx_PyMODINIT_FUNC)\s+(PyInit_[A-Za-z0-9_]+)\s*\(void\)")
+PACKAGE_ALIAS_INIT_RE = re.compile(
+    r"\b(?:PyMODINIT_FUNC|__Pyx_PyMODINIT_FUNC)\s+(PyInit_[A-Za-z0-9_]+)\s*\(void\)\s*"
+    r"\{\s*return\s+PyInit_[A-Za-z0-9_]+\s*\(\s*\)\s*;\s*\}"
+)
 MAIN_FLAG_RE = re.compile(r"\bint\s+(__pyx_module_is_main_[A-Za-z0-9_]+)\s*=\s*0\s*;")
 
 
@@ -526,7 +530,27 @@ def _prepare_module_source(record: ModuleRecord, destination: Path, *, entry: bo
             ),
             ast.Assign(
                 targets=[ast.Name(id="__path__", ctx=ast.Store())],
-                value=ast.List(elts=[ast.Name(id="__name__", ctx=ast.Load())], ctx=ast.Load()),
+                value=ast.List(elts=[], ctx=ast.Load()),
+            ),
+            ast.If(
+                test=ast.Compare(
+                    left=ast.Name(id="__spec__", ctx=ast.Load()),
+                    ops=[ast.IsNot()],
+                    comparators=[ast.Constant(value=None)],
+                ),
+                body=[
+                    ast.Assign(
+                        targets=[
+                            ast.Attribute(
+                                value=ast.Name(id="__spec__", ctx=ast.Load()),
+                                attr="submodule_search_locations",
+                                ctx=ast.Store(),
+                            )
+                        ],
+                        value=ast.Name(id="__path__", ctx=ast.Load()),
+                    )
+                ],
+                orelse=[],
             ),
         ]
         index = _insertion_index(tree.body)
@@ -543,6 +567,7 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
     generated_dir = build_dir / "generated"
     warnings: list[str] = []
     units: list[CythonUnit] = []
+    assigned_init_symbols: dict[str, str] = {}
     for name in report.reachable_modules:
         record = report.modules[name]
         digest = hashlib.sha256((name + "\0" + record.source_sha256).encode("utf-8")).hexdigest()[:20]
@@ -580,7 +605,12 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
         if result.returncode != 0 or not generated.is_file():
             raise BuildError(f"Cython failed for {name}:\n{result.stdout[-8000:]}")
         generated_text = generated.read_text(encoding="utf-8", errors="replace")
-        init_matches = list(dict.fromkeys(INIT_SYMBOL_RE.findall(generated_text)))
+        package_aliases = tuple(sorted(set(PACKAGE_ALIAS_INIT_RE.findall(generated_text))))
+        init_matches = [
+            symbol
+            for symbol in dict.fromkeys(INIT_SYMBOL_RE.findall(generated_text))
+            if symbol not in package_aliases
+        ]
         if len(init_matches) != 1:
             raise BuildError(f"could not identify one Cython init symbol for {name}: {init_matches}")
         main_matches = list(dict.fromkeys(MAIN_FLAG_RE.findall(generated_text)))
@@ -588,7 +618,22 @@ def cythonize_modules(report: AnalysisReport, build_dir: Path, expected_version:
         original_main = main_matches[0] if len(main_matches) == 1 else None
         unique_init = f"PyInit_pysuture_{digest}"
         unique_main = f"pysuture_module_is_main_{digest}" if original_main else None
-        definitions = [f"{original_init}={unique_init}"]
+        definitions = ["CYTHON_NO_PYINIT_EXPORT=1", f"{original_init}={unique_init}"]
+        alias_definitions: list[str] = []
+        for index, alias in enumerate(package_aliases):
+            unique_alias = f"PyInit_pysuture_alias_{digest}_{index}"
+            alias_definitions.append(f"{alias}={unique_alias}")
+            previous = assigned_init_symbols.setdefault(unique_alias, f"{name}:{alias}")
+            if previous != f"{name}:{alias}":
+                raise BuildError(
+                    f"Cython init alias collision between {previous} and {name}:{alias}: {unique_alias}"
+                )
+        definitions.extend(alias_definitions)
+        previous = assigned_init_symbols.setdefault(unique_init, name)
+        if previous != name:
+            raise BuildError(
+                f"Cython init symbol collision between {previous} and {name}: {unique_init}"
+            )
         if original_main and unique_main:
             definitions.append(f"{original_main}={unique_main}")
         units.append(

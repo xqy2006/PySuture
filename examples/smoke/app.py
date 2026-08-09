@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import email
+import importlib
 import importlib.util
 import json
 import multiprocessing
@@ -11,7 +12,11 @@ from pathlib import Path
 
 import attrs
 import regex
+import regular_pkg
+import sibling_pkg
 import smoke_ns
+from regular_pkg import package_value
+from sibling_pkg import sibling_value
 from smoke_ns.child.probe import namespace_value
 
 
@@ -82,6 +87,23 @@ def self_test() -> int:
     # tree. Its regular frozen stdlib package must win over that portion.
     if not callable(getattr(email, "message_from_string", None)):
         return 19
+    if (
+        list(regular_pkg.__path__) != []
+        or regular_pkg.__spec__ is None
+        or regular_pkg.__spec__.submodule_search_locations is not regular_pkg.__path__
+        or package_value() != "package-ok"
+        or list(sibling_pkg.__path__) != []
+        or sibling_pkg.__spec__ is None
+        or sibling_pkg.__spec__.submodule_search_locations is not sibling_pkg.__path__
+        or sibling_value() != "sibling-ok"
+    ):
+        return 20
+    try:
+        importlib.import_module("regular_pkg.injected")
+    except ModuleNotFoundError:
+        pass
+    else:
+        return 21
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))
