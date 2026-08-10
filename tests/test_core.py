@@ -165,7 +165,10 @@ class CoreTests(unittest.TestCase):
         for system_library in (
             "OWNED.LIB",
             "/DEFAULTLIB:OWNED.LIB",
+            "/DEFAULTLIB:OWNED",
+            r'/DEFAULTLIB:"C:\other\OWNED"',
             r'/WHOLEARCHIVE:C:\other\OWNED.LIB',
+            "/WHOLEARCHIVE:OWNED",
         ):
             with self.subTest(system_library=system_library):
                 with self.assertRaisesRegex(BuildError, "owned.lib.*system libraries"):

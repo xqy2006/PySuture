@@ -321,11 +321,15 @@ def _validate_trusted_object_link_inputs(
     for value in system_libraries:
         text = str(value).strip().strip('"')
         option = text.casefold()
+        library_option = False
         if option.startswith(("/defaultlib:", "/wholearchive:")):
+            library_option = True
             text = text.split(":", 1)[1].strip().strip('"')
         elif text.startswith("/"):
             continue
         name = PureWindowsPath(text).name
+        if library_option and name and not PureWindowsPath(name).suffix:
+            name += ".lib"
         if name.casefold().endswith(".lib"):
             system_names.add(name.casefold())
 
