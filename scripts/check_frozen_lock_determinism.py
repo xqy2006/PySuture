@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 
-REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map")
+REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map_semantics")
 
 
 def _sha256(path: Path) -> str:
@@ -21,6 +21,45 @@ def _sha256(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_map_line_bytes(line: bytes) -> bytes:
+    """Ignore only MSVC's unstable attribution of a COMDAT within one archive."""
+    stripped = line.rstrip(b" \t")
+    trailing = line[len(stripped) :]
+    token_start = max(stripped.rfind(b" "), stripped.rfind(b"\t")) + 1
+    token = stripped[token_start:]
+    archive, separator, object_name = token.rpartition(b":")
+    lowered_object = object_name.lower()
+    if (
+        not separator
+        or not archive
+        or b"\\" in object_name
+        or b"/" in object_name
+        or not lowered_object.endswith(b".obj")
+        or lowered_object == b"main.obj"
+    ):
+        return line
+    return (
+        stripped[: token_start + len(archive) + 1]
+        + b"<archive-member.obj>"
+        + trailing
+    )
+
+
+def _normalize_map_line(line: str) -> str:
+    return _normalize_map_line_bytes(line.encode("utf-8")).decode("utf-8")
+
+
+def _normalized_map_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip(b"\r\n")
+            digest.update(_normalize_map_line_bytes(line))
+            if len(line) != len(raw_line):
+                digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -224,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
             name: (_sha256(first_artifacts[name]), _sha256(second_artifacts[name]))
             for name in ("executable", "map", "pdb")
         }
+        hashes["map_semantics"] = (
+            _normalized_map_sha256(first_artifacts["map"]),
+            _normalized_map_sha256(second_artifacts["map"]),
+        )
         mismatches = {
             name: pair
             for name, pair in hashes.items()
