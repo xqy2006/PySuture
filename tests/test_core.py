@@ -918,6 +918,35 @@ class CoreTests(unittest.TestCase):
                     runtime,
                     [("wxpython", {**pack, "trusted_object_origins": value})],
                 )
+
+    def test_pack_composition_rejects_unsafe_or_duplicate_native_library_names(self) -> None:
+        runtime = {
+            "frozen_module_names": [],
+            "builtin_module_registrations": [],
+        }
+        pack = {
+            "descriptor_symbol": "StaticPython_Pack_demo",
+            "trusted_object_origins": [],
+            "frozen_modules": [],
+            "builtin_modules": [],
+            "resources": [],
+        }
+        invalid_values = (
+            "demo.lib",
+            ["../demo.lib"],
+            ["@demo.lib"],
+            ["demo.lib", "DEMO.LIB"],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                LockError,
+                "libraries must be a list of plain .lib basenames|duplicate library",
+            ):
+                validate_pack_composition(
+                    runtime,
+                    [("demo", {**pack, "libraries": value})],
+                )
+
     def test_pack_runtime_contract_rejects_missing_locked_dependency(self) -> None:
         index = self._index()
         runtime = index["runtimes"]["cp313"]["metadata"]
