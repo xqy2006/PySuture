@@ -1,37 +1,37 @@
 {
-  "index_sha256": "dc2d0057f9b3d57c525c8a8b7e45f663d480b7e468b6f3aa87b608cea64bb3e8",
-  "index_url": "https://github.com/xqy2006/StaticPython/releases/download/staticpython-runtime-91b60fc11845/runtime-index.v1.json",
+  "index_sha256": "83f549f033ad0e9d09499d0da0665ec5c93c796f5630ec39822d50466168c936",
+  "index_url": "https://github.com/xqy2006/StaticPython/releases/download/staticpython-runtime-eba3bd79b003/runtime-index.v1.json",
   "kind": "pysuture-reviewed-runtime-catalog",
   "pack_asset_count": 1125,
   "runtimes": {
     "cp311": {
       "cpython_version": "3.11.15",
       "runtime_abi": "staticpython-pack-v1-cp311",
-      "sha256": "a01f1728bca4e77d3588c54758b87a57827d79052682510a8cfa2e301d2c0130"
+      "sha256": "142efa2efcfcca363d1bd51c77a511fb82db3075aae39670e747c37d5d61f20b"
     },
     "cp312": {
       "cpython_version": "3.12.13",
       "runtime_abi": "staticpython-pack-v1-cp312",
-      "sha256": "5504d90af1a56475e457e78d9713968c364a433e623bf2c9cb07d5fac14bca60"
+      "sha256": "af268751755135a74d8b4e4a9aa54c75fdc8ef2237a39856a7d3a6e6795cb017"
     },
     "cp313": {
-      "cpython_version": "3.13.14",
+      "cpython_version": "3.13.15",
       "runtime_abi": "staticpython-pack-v1-cp313",
-      "sha256": "ffcac5806cbd36100bb8f0b3652f32b3c7e60a652770384cf31a053213b26587"
+      "sha256": "5cbf5b60fa97df6590a2073c0eb4336f6f8dd517b2d3c8cab5e540a112465fb8"
     },
     "cp314": {
-      "cpython_version": "3.14.6",
+      "cpython_version": "3.14.7",
       "runtime_abi": "staticpython-pack-v1-cp314",
-      "sha256": "47abf472bfc479b980d72c76c0fc07963b6a13df1d2201b5919a1d6f352961f8"
+      "sha256": "b8a2f9de3b0ace8294fc6541ca4c056c69bd9f529c03f0a12a8f9016b0ec25b7"
     },
     "cp315": {
-      "cpython_version": "3.15.0b4",
+      "cpython_version": "3.15.0rc1",
       "runtime_abi": "staticpython-pack-v1-cp315",
-      "sha256": "1f41d328481bca1d0abd3ce894f73c3f7275188ccc8987f08175f802d0c32835"
+      "sha256": "3fea3bc488a18eaf1c37bb2c1e99a13c1cac603de3bedbb61caae381448e915b"
     }
   },
   "schema_version": 1,
-  "staticpython_commit": "91b60fc11845d65949d854199f65316bb1216aac",
+  "staticpython_commit": "eba3bd79b003cab55eead99e4b205c8979e02600",
   "staticpython_repository": "xqy2006/StaticPython",
   "status": "reviewed",
   "target_platform": "windows-x64",
