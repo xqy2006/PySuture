@@ -149,7 +149,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("forbidden_main_object_records", workflow)
         self.assertIn("non_system_dependencies", workflow)
         self.assertIn("runtime created or extracted files", workflow)
-        self.assertIn('wx.core.__file__ != "staticpython-resource:///Lib/wx/core.py"', app)
+        self.assertIn('wx_core = importlib.import_module("wx.core")', app)
+        self.assertNotIn("\nimport wx.core\n", app)
+        self.assertIn('wx_core.__file__ != "staticpython-resource:///Lib/wx/core.py"', app)
         self.assertIn("os.listdir(locale_dir)", app)
 
 
