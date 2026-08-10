@@ -1,8 +1,18 @@
+import importlib.util
 from pathlib import Path
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DETERMINISM_SPEC = importlib.util.spec_from_file_location(
+    "pysuture_frozen_lock_determinism",
+    ROOT / "scripts" / "check_frozen_lock_determinism.py",
+)
+if DETERMINISM_SPEC is None or DETERMINISM_SPEC.loader is None:
+    raise RuntimeError("could not load the frozen-lock determinism script")
+DETERMINISM_MODULE = importlib.util.module_from_spec(DETERMINISM_SPEC)
+DETERMINISM_SPEC.loader.exec_module(DETERMINISM_MODULE)
+_normalize_map_line = DETERMINISM_MODULE._normalize_map_line
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -82,11 +92,30 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("second-location-with-a-different-length", script)
         self.assertIn('"--frozen-lock"', script)
         self.assertIn('"--offline"', script)
-        self.assertIn('REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map")', script)
+        self.assertIn(
+            'REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map_semantics")',
+            script,
+        )
+        self.assertIn("_normalized_map_sha256", script)
         self.assertIn("frozen build mutated pysuture.lock", script)
         self.assertIn("_assert_reports_match", script)
         self.assertIn("distribution directory must contain only", script)
         self.assertIn("include-hidden-files: true", workflow)
+
+    def test_map_normalization_only_ignores_members_within_one_archive(self) -> None:
+        prefix = " 0002:00ecacd8       __real@bff0000000000000    00000001416e6cd8     "
+        first = prefix + "python313:unicodectype.obj"
+        second = prefix + "python313:floatobject.obj"
+
+        self.assertEqual(_normalize_map_line(first), _normalize_map_line(second))
+        self.assertNotEqual(
+            _normalize_map_line(first),
+            _normalize_map_line(prefix + "other:floatobject.obj"),
+        )
+        self.assertNotEqual(
+            _normalize_map_line(prefix + "python313:main.obj"),
+            _normalize_map_line(prefix + "python313:other.obj"),
+        )
 
 
 if __name__ == "__main__":

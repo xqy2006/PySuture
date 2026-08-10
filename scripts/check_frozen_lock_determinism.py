@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 
-REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map")
+REQUIRED_IDENTICAL_ARTIFACTS = ("executable", "map_semantics")
 
 
 def _sha256(path: Path) -> str:
@@ -21,6 +21,32 @@ def _sha256(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_map_line(line: str) -> str:
+    """Ignore only MSVC's unstable attribution of a COMDAT within one archive."""
+    match = re.search(
+        r"(?P<archive>\S+):(?P<object>[^:\s]+\.obj)(?P<trailing>\s*)$",
+        line,
+        flags=re.IGNORECASE,
+    )
+    if match is None or match.group("object").casefold() == "main.obj":
+        return line
+    return (
+        line[: match.start("object")]
+        + "<archive-member.obj>"
+        + line[match.end("object") :]
+    )
+
+
+def _normalized_map_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.rstrip("\r\n")
+            digest.update(_normalize_map_line(line).encode("utf-8"))
+            digest.update(b"\n")
     return digest.hexdigest()
 
 
@@ -224,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
             name: (_sha256(first_artifacts[name]), _sha256(second_artifacts[name]))
             for name in ("executable", "map", "pdb")
         }
+        hashes["map_semantics"] = (
+            _normalized_map_sha256(first_artifacts["map"]),
+            _normalized_map_sha256(second_artifacts["map"]),
+        )
         mismatches = {
             name: pair
             for name, pair in hashes.items()
