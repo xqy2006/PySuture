@@ -117,6 +117,7 @@ class CoreTests(unittest.TestCase):
                     "0001:00000048 suffix wxbase32u:main.obj-extra",
                     "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
                     r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
+                    "0001:00000060 nested evil:wxbase32u.lib(main.obj)",
                 ]
             ),
             {("wxbase32u.lib", "main.obj")},
@@ -139,6 +140,7 @@ class CoreTests(unittest.TestCase):
                 "0001:00000048 suffix wxbase32u:main.obj-extra",
                 "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
                 r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
+                "0001:00000060 nested evil:wxbase32u.lib(main.obj)",
             ],
         )
 
@@ -160,7 +162,11 @@ class CoreTests(unittest.TestCase):
                 runtime_libraries=[runtime],
                 system_libraries=[],
             )
-        for system_library in ("OWNED.LIB", "/DEFAULTLIB:OWNED.LIB"):
+        for system_library in (
+            "OWNED.LIB",
+            "/DEFAULTLIB:OWNED.LIB",
+            r'/WHOLEARCHIVE:C:\other\OWNED.LIB',
+        ):
             with self.subTest(system_library=system_library):
                 with self.assertRaisesRegex(BuildError, "owned.lib.*system libraries"):
                     _validate_trusted_object_link_inputs(

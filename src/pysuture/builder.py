@@ -257,37 +257,36 @@ def _classify_main_object_records(
 ) -> tuple[list[str], list[str]]:
     main_object_pattern = re.compile(r"(?i)\bmain\.obj\b")
     records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
-    allowed_archive_patterns = [
-        re.compile(
-            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(library).name[:-4])}"
-            rf"(?:\.lib)?[:(]{re.escape(object_name)}(?:\)|(?=\s|$))"
-        )
+    trusted = {
+        (PureWindowsPath(library).name.casefold(), object_name.casefold())
         for library, object_name in trusted_object_origins
-        if (
-            isinstance(library, str)
-            and library.casefold().endswith(".lib")
-            and isinstance(object_name, str)
-            and object_name.casefold() == "main.obj"
-        )
-    ]
+        if isinstance(library, str) and isinstance(object_name, str)
+    }
     allowed = []
     forbidden = []
     for record in records:
         object_spans = [match.span() for match in main_object_pattern.finditer(record)]
-        trusted_spans = [
-            match.span()
-            for pattern in allowed_archive_patterns
-            for match in pattern.finditer(record)
-        ]
-        destination = (
-            allowed
-            if object_spans
-            and all(
-                any(start <= object_start and object_end <= end for start, end in trusted_spans)
-                for object_start, object_end in object_spans
-            )
-            else forbidden
+        token = record.split()[-1]
+        separator = token.rfind(":")
+        drive_separator = (
+            separator == 1
+            and len(token) > 2
+            and token[0].isalpha()
+            and token[2] in "\\/"
         )
+        if separator >= 0 and not drive_separator:
+            library, object_name = token[:separator], token[separator + 1 :]
+        else:
+            parenthesized = re.fullmatch(r"(.+)\(([^()]*)\)", token)
+            if parenthesized is None:
+                library, object_name = "", ""
+            else:
+                library, object_name = parenthesized.groups()
+        library_name = PureWindowsPath(library).name
+        if library_name and not library_name.casefold().endswith(".lib"):
+            library_name += ".lib"
+        origin = (library_name.casefold(), object_name.casefold())
+        destination = allowed if len(object_spans) == 1 and origin in trusted else forbidden
         destination.append(record)
     return allowed, forbidden
 
@@ -321,7 +320,8 @@ def _validate_trusted_object_link_inputs(
     system_names = set()
     for value in system_libraries:
         text = str(value).strip().strip('"')
-        if text.casefold().startswith("/defaultlib:"):
+        option = text.casefold()
+        if option.startswith(("/defaultlib:", "/wholearchive:")):
             text = text.split(":", 1)[1].strip().strip('"')
         elif text.startswith("/"):
             continue

@@ -24,29 +24,42 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _normalize_map_line(line: str) -> str:
+def _normalize_map_line_bytes(line: bytes) -> bytes:
     """Ignore only MSVC's unstable attribution of a COMDAT within one archive."""
-    match = re.search(
-        r"(?P<archive>\S+):(?P<object>[^:\s]+\.obj)(?P<trailing>\s*)$",
-        line,
-        flags=re.IGNORECASE,
-    )
-    if match is None or match.group("object").casefold() == "main.obj":
+    stripped = line.rstrip(b" \t")
+    trailing = line[len(stripped) :]
+    token_start = max(stripped.rfind(b" "), stripped.rfind(b"\t")) + 1
+    token = stripped[token_start:]
+    archive, separator, object_name = token.rpartition(b":")
+    lowered_object = object_name.lower()
+    if (
+        not separator
+        or not archive
+        or b"\\" in object_name
+        or b"/" in object_name
+        or not lowered_object.endswith(b".obj")
+        or lowered_object == b"main.obj"
+    ):
         return line
     return (
-        line[: match.start("object")]
-        + "<archive-member.obj>"
-        + line[match.end("object") :]
+        stripped[: token_start + len(archive) + 1]
+        + b"<archive-member.obj>"
+        + trailing
     )
+
+
+def _normalize_map_line(line: str) -> str:
+    return _normalize_map_line_bytes(line.encode("utf-8")).decode("utf-8")
 
 
 def _normalized_map_sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+    with path.open("rb") as handle:
         for raw_line in handle:
-            line = raw_line.rstrip("\r\n")
-            digest.update(_normalize_map_line(line).encode("utf-8"))
-            digest.update(b"\n")
+            line = raw_line.rstrip(b"\r\n")
+            digest.update(_normalize_map_line_bytes(line))
+            if len(line) != len(raw_line):
+                digest.update(b"\n")
     return digest.hexdigest()
 
 

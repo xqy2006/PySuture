@@ -13,6 +13,7 @@ if DETERMINISM_SPEC is None or DETERMINISM_SPEC.loader is None:
 DETERMINISM_MODULE = importlib.util.module_from_spec(DETERMINISM_SPEC)
 DETERMINISM_SPEC.loader.exec_module(DETERMINISM_MODULE)
 _normalize_map_line = DETERMINISM_MODULE._normalize_map_line
+_normalize_map_line_bytes = DETERMINISM_MODULE._normalize_map_line_bytes
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -115,6 +116,14 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotEqual(
             _normalize_map_line(prefix + "python313:main.obj"),
             _normalize_map_line(prefix + "python313:other.obj"),
+        )
+        self.assertNotEqual(
+            _normalize_map_line(prefix + r"C:\first-root\launcher.obj"),
+            _normalize_map_line(prefix + r"C:\second-root\launcher.obj"),
+        )
+        self.assertNotEqual(
+            _normalize_map_line_bytes(b"unmatched byte: \x80"),
+            _normalize_map_line_bytes(b"unmatched byte: \x81"),
         )
 
 
