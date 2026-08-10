@@ -87,7 +87,7 @@ class WorkflowContractTests(unittest.TestCase):
 
         self.assertIn("  determinism:\n", workflow)
         self.assertIn("check_frozen_lock_determinism.py", workflow)
-        self.assertIn("needs: [candidate, e2e, determinism]", workflow)
+        self.assertIn("needs: [candidate, e2e, determinism, ui-pack-e2e]", workflow)
         self.assertIn('first = work_root / "first-project"', script)
         self.assertIn('/ "nested"', script)
         self.assertIn("second-location-with-a-different-length", script)
@@ -125,6 +125,34 @@ class WorkflowContractTests(unittest.TestCase):
             _normalize_map_line_bytes(b"unmatched byte: \x80"),
             _normalize_map_line_bytes(b"unmatched byte: \x81"),
         )
+
+    def test_runtime_executables_run_inside_the_snapshotted_directory(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertGreaterEqual(workflow.count("Push-Location $work"), 1)
+        self.assertEqual(workflow.count("Set-Location $work"), 2)
+        self.assertIn("$windowInfo.WorkingDirectory = $work", workflow)
+
+    def test_ui_gate_requires_virtual_wx_resources_and_strict_pe_evidence(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "sync-staticpython.yml").read_text(
+            encoding="utf-8"
+        )
+        app = (ROOT / "examples" / "wx-fltk-smoke" / "app.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('python: ["3.11", "3.12", "3.13", "3.14", "3.15"]', workflow)
+        self.assertIn("trusted_object_origins", workflow)
+        self.assertIn("allowed_trusted_object_records", workflow)
+        self.assertIn("forbidden_main_object_records", workflow)
+        self.assertIn("non_system_dependencies", workflow)
+        self.assertIn("runtime created or extracted files", workflow)
+        self.assertIn('wx_core = importlib.import_module("wx.core")', app)
+        self.assertNotIn("\nimport wx.core\n", app)
+        self.assertIn('wx_core.__file__ != "staticpython-resource:///Lib/wx/core.py"', app)
+        self.assertIn("os.listdir(locale_dir)", app)
 
 
 if __name__ == "__main__":

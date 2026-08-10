@@ -19,6 +19,7 @@ from .launcher import write_launcher
 from .lockfile import validate_asset_records
 from .resources import ResourceRecord, collect_application_resources, write_resource_sources
 from .resolver import (
+    PLAIN_LIBRARY_NAME_PATTERN,
     validate_locked_asset_metadata,
     validate_pack_composition,
     validate_pack_runtime_compatibility,
@@ -39,6 +40,31 @@ REQUIRED_WINDOWS_SYSTEM_LIBRARIES = (
     "shell32.lib",
     "user32.lib",
 )
+
+
+def _resolve_system_libraries(libraries: list[str], suppressed: list[str]) -> list[str]:
+    required_names = {name.casefold() for name in REQUIRED_WINDOWS_SYSTEM_LIBRARIES}
+    suppressed_names: set[str] = set()
+    for library in suppressed:
+        name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid suppressed system library name: {name!r}")
+        key = name.casefold()
+        if key in required_names:
+            raise BuildError(f"packs cannot suppress required Windows system library {name}")
+        suppressed_names.add(key)
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for library in libraries:
+        name = str(library)
+        if PLAIN_LIBRARY_NAME_PATTERN.fullmatch(name) is None:
+            raise BuildError(f"invalid system library name: {name!r}")
+        key = name.casefold()
+        if key in suppressed_names or key in seen:
+            continue
+        seen.add(key)
+        resolved.append(name)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -482,6 +508,7 @@ def build_executable(
     pack_libraries_by_name: dict[str, tuple[Path, str]] = {}
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
+    suppressed_system_libraries: list[str] = []
     trusted_object_origins: set[tuple[str, str]] = set()
     for locked_record, pack_root, metadata in assets.packs:
         symbol = metadata.get("descriptor_symbol")
@@ -512,6 +539,7 @@ def build_executable(
                 raise BuildError(f"pack {locked_record['name']} wholearchive library is missing: {library_name}")
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
+        suppressed_system_libraries.extend(metadata.get("suppressed_system_libraries", []))
         trusted_object_origins.update(
             (record["library"], record["object"])
             for record in metadata.get("trusted_object_origins", [])
@@ -574,7 +602,7 @@ def build_executable(
         runtime_libraries.append(_safe_member(library_dir, library_name))
     system_libraries.extend(assets.runtime_metadata.get("system_libraries", []))
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
-    system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
+    system_libraries = _resolve_system_libraries(system_libraries, suppressed_system_libraries)
     _validate_trusted_object_link_inputs(
         trusted_object_origins,
         pack_libraries=pack_libraries,

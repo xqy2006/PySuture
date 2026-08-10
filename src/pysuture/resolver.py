@@ -27,6 +27,7 @@ LOCKED_METADATA_DEFAULTS = {
     "libraries": [],
     "wholearchive": [],
     "system_libraries": [],
+    "suppressed_system_libraries": [],
     "sources": [],
     "license": {},
     "top_level_import_names": [],
@@ -59,7 +60,6 @@ TOOLCHAIN_LINK_COMPATIBILITY_FIELDS = (
     "platform_toolset",
     "runtime_library",
 )
-
 
 PLAIN_LIBRARY_NAME_PATTERN = re.compile(
     r"[A-Za-z0-9_][A-Za-z0-9_.+-]*\.lib",
@@ -411,6 +411,18 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
     claimed_resources: dict[str, str] = {}
     claimed_descriptors: dict[str, str] = {}
 
+    runtime_link_libraries = _validate_plain_library_names(
+        runtime_metadata.get("link_libraries", []),
+        owner="runtime SDK",
+        field="link_libraries",
+    )
+    _validate_plain_library_names(
+        runtime_metadata.get("system_libraries", []),
+        owner="runtime SDK",
+        field="system_libraries",
+    )
+    runtime_library_names = {name.casefold() for name in runtime_link_libraries}
+
     runtime_frozen = runtime_metadata.get("frozen_module_names", [])
     if not isinstance(runtime_frozen, list):
         raise LockError("runtime SDK frozen_module_names must be a list")
@@ -438,6 +450,28 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
             owner=f"pack {owner}",
             field="libraries",
         )
+        wholearchive = _validate_plain_library_names(
+            metadata.get("wholearchive", []),
+            owner=f"pack {owner}",
+            field="wholearchive",
+        )
+        native_library_names = {name.casefold() for name in native_libraries}
+        missing_wholearchive = [
+            name for name in wholearchive if name.casefold() not in native_library_names
+        ]
+        if missing_wholearchive:
+            raise LockError(
+                f"pack {owner} wholearchive libraries are missing from libraries: "
+                + ", ".join(missing_wholearchive)
+            )
+        runtime_collisions = [
+            name for name in native_libraries if name.casefold() in runtime_library_names
+        ]
+        if runtime_collisions:
+            raise LockError(
+                f"pack {owner} native libraries conflict with the runtime SDK: "
+                + ", ".join(runtime_collisions)
+            )
         _validate_trusted_object_origins(
             metadata.get("trusted_object_origins", []),
             owner=f"pack {owner}",
@@ -509,6 +543,16 @@ def validate_pack_runtime_compatibility(
     for owner, metadata in packs:
         dependencies = metadata.get("dependencies", [])
         conflicts = metadata.get("conflicts", [])
+        _validate_plain_library_names(
+            metadata.get("system_libraries", []),
+            owner=f"pack {owner}",
+            field="system_libraries",
+        )
+        _validate_plain_library_names(
+            metadata.get("suppressed_system_libraries", []),
+            owner=f"pack {owner}",
+            field="suppressed_system_libraries",
+        )
         if not isinstance(dependencies, list) or not all(
             isinstance(name, str) and name for name in dependencies
         ):
