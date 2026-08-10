@@ -114,6 +114,8 @@ class CoreTests(unittest.TestCase):
                     "0001:00000038 undeclared other.lib(main.obj)",
                     "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
                     "0001:00000048 suffix wxbase32u:main.obj-extra",
+                    "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
+                    r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
                 ]
             ),
             {("wxbase32u.lib", "main.obj")},
@@ -134,6 +136,8 @@ class CoreTests(unittest.TestCase):
                 "0001:00000038 undeclared other.lib(main.obj)",
                 "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
                 "0001:00000048 suffix wxbase32u:main.obj-extra",
+                "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
+                r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
             ],
         )
 

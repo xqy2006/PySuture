@@ -255,6 +255,7 @@ def _classify_main_object_records(
     map_text: str,
     trusted_object_origins: set[tuple[str, str]],
 ) -> tuple[list[str], list[str]]:
+    main_object_pattern = re.compile(r"(?i)\bmain\.obj\b")
     records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
     allowed_archive_patterns = [
         re.compile(
@@ -272,10 +273,19 @@ def _classify_main_object_records(
     allowed = []
     forbidden = []
     for record in records:
-        normalized_record = record.casefold()
+        object_spans = [match.span() for match in main_object_pattern.finditer(record)]
+        trusted_spans = [
+            match.span()
+            for pattern in allowed_archive_patterns
+            for match in pattern.finditer(record)
+        ]
         destination = (
             allowed
-            if any(pattern.search(normalized_record) for pattern in allowed_archive_patterns)
+            if object_spans
+            and all(
+                any(start <= object_start and object_end <= end for start, end in trusted_spans)
+                for object_start, object_end in object_spans
+            )
             else forbidden
         )
         destination.append(record)
