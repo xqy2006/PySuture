@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .analyzer import AnalysisReport
 from .cache import extract_asset, fetch_asset, sha256_file
@@ -292,6 +292,59 @@ def _classify_main_object_records(
     return allowed, forbidden
 
 
+def _validate_trusted_object_link_inputs(
+    trusted_object_origins: set[tuple[str, str]],
+    *,
+    pack_libraries: list[Path],
+    runtime_libraries: list[Path],
+    system_libraries: list[str],
+) -> None:
+    trusted_libraries = {
+        PureWindowsPath(library).name.casefold()
+        for library, object_name in trusted_object_origins
+        if object_name.casefold() == "main.obj"
+    }
+    if not trusted_libraries:
+        return
+
+    pack_names = [path.name.casefold() for path in pack_libraries]
+    missing_or_duplicated = sorted(
+        name for name in trusted_libraries if pack_names.count(name) != 1
+    )
+    if missing_or_duplicated:
+        raise BuildError(
+            "trusted object origins must identify exactly one selected pack archive: "
+            + ", ".join(missing_or_duplicated)
+        )
+
+    runtime_names = {path.name.casefold() for path in runtime_libraries}
+    system_names = set()
+    for value in system_libraries:
+        text = str(value).strip().strip('"')
+        if text.casefold().startswith("/defaultlib:"):
+            text = text.split(":", 1)[1].strip().strip('"')
+        elif text.startswith("/"):
+            continue
+        name = PureWindowsPath(text).name
+        if name.casefold().endswith(".lib"):
+            system_names.add(name.casefold())
+
+    collisions = []
+    for name in sorted(trusted_libraries):
+        sources = []
+        if name in runtime_names:
+            sources.append("runtime SDK")
+        if name in system_names:
+            sources.append("system libraries")
+        if sources:
+            collisions.append(f"{name} ({' and '.join(sources)})")
+    if collisions:
+        raise BuildError(
+            "trusted object origin basenames collide with non-pack linker inputs: "
+            + ", ".join(collisions)
+        )
+
+
 def audit_executable(
     executable: Path,
     map_path: Path,
@@ -518,6 +571,12 @@ def build_executable(
     system_libraries.extend(assets.runtime_metadata.get("system_libraries", []))
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
     system_libraries = list(dict.fromkeys(str(name) for name in system_libraries))
+    _validate_trusted_object_link_inputs(
+        trusted_object_origins,
+        pack_libraries=pack_libraries,
+        runtime_libraries=runtime_libraries,
+        system_libraries=system_libraries,
+    )
 
     original_link_libraries = [*pack_libraries, *runtime_libraries]
     staged_link_libraries = _stage_link_libraries(original_link_libraries, build_dir)

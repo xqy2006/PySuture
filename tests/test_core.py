@@ -34,6 +34,7 @@ from pysuture.builder import (
     _command_path,
     _compile_source,
     _stage_link_libraries,
+    _validate_trusted_object_link_inputs,
     materialize_assets,
 )
 from pysuture.cache import (
@@ -140,6 +141,41 @@ class CoreTests(unittest.TestCase):
                 r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
             ],
         )
+
+    def test_trusted_object_origin_rejects_ambiguous_link_inputs(self) -> None:
+        trusted = {("owned.lib", "main.obj")}
+        pack = self.root / "pack" / "owned.lib"
+        runtime = self.root / "runtime" / "owned.lib"
+
+        _validate_trusted_object_link_inputs(
+            trusted,
+            pack_libraries=[pack],
+            runtime_libraries=[],
+            system_libraries=["user32.lib"],
+        )
+        with self.assertRaisesRegex(BuildError, "owned.lib.*runtime SDK"):
+            _validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[runtime],
+                system_libraries=[],
+            )
+        for system_library in ("OWNED.LIB", "/DEFAULTLIB:OWNED.LIB"):
+            with self.subTest(system_library=system_library):
+                with self.assertRaisesRegex(BuildError, "owned.lib.*system libraries"):
+                    _validate_trusted_object_link_inputs(
+                        trusted,
+                        pack_libraries=[pack],
+                        runtime_libraries=[],
+                        system_libraries=[system_library],
+                    )
+        with self.assertRaisesRegex(BuildError, "exactly one selected pack archive"):
+            _validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[],
+                runtime_libraries=[],
+                system_libraries=[],
+            )
 
     def test_latest_prerelease_asset_uses_publication_time_not_api_order(self) -> None:
         releases = [
