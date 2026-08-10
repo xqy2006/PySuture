@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -21,11 +22,20 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from pysuture.analyzer import _private_package_modules, analyze_project
+from pysuture.analyzer import (
+    AnalysisReport,
+    ModuleRecord,
+    _private_package_modules,
+    analyze_project,
+)
 from pysuture.builder import (
     REQUIRED_WINDOWS_SYSTEM_LIBRARIES,
     _classify_main_object_records,
+    _command_path,
+    _compile_source,
     _resolve_system_libraries,
+    _stage_link_libraries,
+    _validate_trusted_object_link_inputs,
     materialize_assets,
 )
 from pysuture.cache import (
@@ -41,7 +51,15 @@ from pysuture.cache import (
 )
 from pysuture.cli import _unresolved_dynamic_gaps, _validate_locked_imports, main as cli_main
 from pysuture.config import DataMapping, initialize_project, load_project_config
-from pysuture.cythonizer import cythonize_modules, installed_cython_version
+from pysuture.cythonizer import (
+    _ensure_freeze_support_prelude,
+    _freeze_support_bindings,
+    _is_main_guard,
+    _no_argument_call,
+    _prepare_module_source,
+    cythonize_modules,
+    installed_cython_version,
+)
 from pysuture.errors import AnalysisError, BuildError, ConfigurationError, LockError
 from pysuture.launcher import write_launcher
 from pysuture.lockfile import (
@@ -59,7 +77,7 @@ from pysuture.resolver import (
     validate_pack_composition,
     validate_pack_runtime_compatibility,
 )
-from pysuture.resources import collect_application_resources
+from pysuture.resources import ResourceRecord, collect_application_resources, write_resource_sources
 from pysuture.toolchain import MSVCToolchain, locked_toolchain_mismatches, validate_locked_toolchain
 
 
@@ -117,7 +135,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "invalid suppressed system library name"):
             _resolve_system_libraries(["gdiplus.lib"], ["C:gdiplus.lib"])
 
-    def test_main_object_audit_allows_only_selected_pack_libraries(self) -> None:
+    def test_main_object_audit_allows_only_explicit_library_object_origins(self) -> None:
         allowed, forbidden = _classify_main_object_records(
             "\n".join(
                 [
@@ -126,9 +144,15 @@ class CoreTests(unittest.TestCase):
                     "0001:00000010 Py_Main pythoncore.lib(main.obj)",
                     r"0001:00000020 custom_entry C:\build\main.obj",
                     "0001:00000030 impostor notwxbase32u:main.obj",
+                    "0001:00000038 undeclared other.lib(main.obj)",
+                    "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
+                    "0001:00000048 suffix wxbase32u:main.obj-extra",
+                    "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
+                    r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
+                    "0001:00000060 nested evil:wxbase32u.lib(main.obj)",
                 ]
             ),
-            {"wxbase32u.lib"},
+            {("wxbase32u.lib", "main.obj")},
         )
         self.assertEqual(
             allowed,
@@ -143,8 +167,56 @@ class CoreTests(unittest.TestCase):
                 "0001:00000010 Py_Main pythoncore.lib(main.obj)",
                 r"0001:00000020 custom_entry C:\build\main.obj",
                 "0001:00000030 impostor notwxbase32u:main.obj",
+                "0001:00000038 undeclared other.lib(main.obj)",
+                "0001:00000040 suffix wxbase32u.lib(main.obj.evil)",
+                "0001:00000048 suffix wxbase32u:main.obj-extra",
+                "0001:00000050 mixed wxbase32u.lib(main.obj) pythoncore.lib(main.obj)",
+                r"0001:00000058 mixed wxbase32u:main.obj C:\build\main.obj",
+                "0001:00000060 nested evil:wxbase32u.lib(main.obj)",
             ],
         )
+
+    def test_trusted_object_origin_rejects_ambiguous_link_inputs(self) -> None:
+        trusted = {("owned.lib", "main.obj")}
+        pack = self.root / "pack" / "owned.lib"
+        runtime = self.root / "runtime" / "owned.lib"
+
+        _validate_trusted_object_link_inputs(
+            trusted,
+            pack_libraries=[pack],
+            runtime_libraries=[],
+            system_libraries=["user32.lib"],
+        )
+        with self.assertRaisesRegex(BuildError, "owned.lib.*runtime SDK"):
+            _validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[pack],
+                runtime_libraries=[runtime],
+                system_libraries=[],
+            )
+        for system_library in (
+            "OWNED.LIB",
+            "/DEFAULTLIB:OWNED.LIB",
+            "/DEFAULTLIB:OWNED",
+            r'/DEFAULTLIB:"C:\other\OWNED"',
+            r'/WHOLEARCHIVE:C:\other\OWNED.LIB',
+            "/WHOLEARCHIVE:OWNED",
+        ):
+            with self.subTest(system_library=system_library):
+                with self.assertRaisesRegex(BuildError, "owned.lib.*system libraries"):
+                    _validate_trusted_object_link_inputs(
+                        trusted,
+                        pack_libraries=[pack],
+                        runtime_libraries=[],
+                        system_libraries=[system_library],
+                    )
+        with self.assertRaisesRegex(BuildError, "exactly one selected pack archive"):
+            _validate_trusted_object_link_inputs(
+                trusted,
+                pack_libraries=[],
+                runtime_libraries=[],
+                system_libraries=[],
+            )
 
     def test_latest_prerelease_asset_uses_publication_time_not_api_order(self) -> None:
         releases = [
@@ -250,6 +322,7 @@ class CoreTests(unittest.TestCase):
             "dependency_constraints": {},
             "conflicts": [],
             "suppressed_system_libraries": ["gdiplus.lib"],
+            "trusted_object_origins": [],
             "descriptor_symbol": "StaticPython_Pack_attrs",
             "libraries": [],
             "sources": ["src/pack.c"],
@@ -297,6 +370,14 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(report.namespace_packages, ("ns", "ns.child"))
         self.assertIn("attrs", report.external_imports)
+
+    def test_namespace_child_under_regular_package_is_not_preinitialized(self) -> None:
+        self._write_project("import pkg.portion.module\n")
+        (self.root / "pkg" / "portion").mkdir()
+        (self.root / "pkg" / "portion" / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+        report = analyze_project(load_project_config(self.root))
+        self.assertIn("pkg.portion", report.namespace_packages)
+        self.assertNotIn("pkg", report.namespace_packages)
 
     def test_dynamic_import_gap_requires_explicit_declaration(self) -> None:
         self._write_project("import importlib\nname = 'pkg.helper'\nimportlib.import_module(name)\n")
@@ -369,6 +450,47 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(payload["cython_version"], "3.2.9")
         self.assertEqual(payload["packs"][0]["descriptor_symbol"], "StaticPython_Pack_attrs")
         self.assertEqual(payload["packs"][0]["suppressed_system_libraries"], ["gdiplus.lib"])
+        self.assertEqual(payload["packs"][0]["trusted_object_origins"], [])
+
+    def test_resolver_accepts_reachable_local_namespace_without_pack(self) -> None:
+        self._write_project("import ns\n")
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+
+        self.assertIn("ns", report.external_imports)
+        self.assertIn("ns", report.namespace_packages)
+        resolution = resolve_assets(config, report)
+        self.assertEqual(resolution.packs, ())
+        _validate_locked_imports(
+            build_lock_payload(config, report, resolution),
+            report,
+            config,
+        )
+
+    def test_resolver_prefers_regular_pack_over_local_namespace_portion(self) -> None:
+        index = self._index()
+        attrs = index["packs"]["attrs"].pop("25.3.0")
+        attrs["cp313"]["metadata"] = {
+            **attrs["cp313"]["metadata"],
+            "name": "ns-regular",
+            "top_level_import_names": ["ns"],
+            "descriptor_symbol": "StaticPython_Pack_ns_regular",
+        }
+        index["packs"] = {"ns-regular": {"25.3.0": attrs}}
+        self._write_project("import ns\n", index=index)
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+
+        resolution = resolve_assets(config, report)
+        self.assertEqual(
+            [(pack.name, pack.version) for pack in resolution.packs],
+            [("ns-regular", "25.3.0")],
+        )
+        _validate_locked_imports(
+            build_lock_payload(config, report, resolution),
+            report,
+            config,
+        )
 
     def test_locked_build_metadata_must_match_verified_assets(self) -> None:
         self._write_project("import attrs\n")
@@ -399,6 +521,15 @@ class CoreTests(unittest.TestCase):
                 owner="pack attrs",
             )
 
+        injected_origin = {
+            **pack_record,
+            "trusted_object_origins": [
+                {"library": "attrs.lib", "object": "main.obj"},
+            ],
+        }
+        with self.assertRaisesRegex(LockError, "metadata differs.*trusted_object_origins"):
+            validate_locked_asset_metadata(injected_origin, pack_metadata, owner="pack attrs")
+
         runtime_root = self.root / "runtime"
         (runtime_root / "metadata").mkdir(parents=True)
         (runtime_root / "metadata" / "runtime-sdk.v1.json").write_text(
@@ -425,6 +556,57 @@ class CoreTests(unittest.TestCase):
             self.assertRaisesRegex(LockError, "pack attrs metadata differs.*sources"),
         ):
             materialize_assets(tampered_payload, offline=True)
+
+    def test_trusted_object_origin_survives_index_lock_and_archive_materialization(
+        self,
+    ) -> None:
+        index = self._index()
+        pack_metadata = index["packs"]["attrs"]["25.3.0"]["cp313"]["metadata"]
+        pack_metadata["libraries"] = ["wxbase32u.lib"]
+        pack_metadata["trusted_object_origins"] = [
+            {"library": "wxbase32u.lib", "object": "main.obj"},
+        ]
+        self._write_project("import attrs\n", index=index)
+        config = load_project_config(self.root)
+        report = analyze_project(config)
+        resolution = resolve_assets(config, report)
+        payload = build_lock_payload(config, report, resolution)
+        origin = [{"library": "wxbase32u.lib", "object": "main.obj"}]
+        self.assertEqual(payload["packs"][0]["trusted_object_origins"], origin)
+
+        runtime_root = self.root / "runtime"
+        (runtime_root / "metadata").mkdir(parents=True)
+        (runtime_root / "metadata" / "runtime-sdk.v1.json").write_text(
+            json.dumps(resolution.runtime.metadata),
+            encoding="utf-8",
+        )
+        pack_root = self.root / "pack"
+        pack_root.mkdir()
+        (pack_root / "pack.json").write_text(
+            json.dumps(resolution.packs[0].metadata),
+            encoding="utf-8",
+        )
+        with (
+            mock.patch(
+                "pysuture.builder.fetch_asset",
+                side_effect=[self.root / "runtime.zip", self.root / "attrs.zip"],
+            ),
+            mock.patch(
+                "pysuture.builder.extract_asset",
+                side_effect=[runtime_root, pack_root],
+            ),
+        ):
+            assets = materialize_assets(payload, offline=True)
+        self.assertEqual(assets.packs[0][2]["trusted_object_origins"], origin)
+
+        missing_origin = json.loads(json.dumps(payload["packs"][0]))
+        del missing_origin["trusted_object_origins"]
+        with self.assertRaisesRegex(LockError, "metadata differs.*trusted_object_origins"):
+            validate_locked_asset_metadata(
+                missing_origin,
+                resolution.packs[0].metadata,
+                owner="pack attrs",
+            )
 
     def test_lock_metadata_projection_is_an_independent_snapshot(self) -> None:
         first_metadata = {"sources": ["src/pack.c"], "license": {"status": "complete"}}
@@ -580,6 +762,112 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "does not match pysuture.lock"):
             validate_locked_toolchain(expected, toolchain)
 
+    def test_msvc_compile_uses_reproducible_relative_inputs_without_ltcg(self) -> None:
+        project_root = self.root / "project"
+        build_dir = project_root / ".pysuture" / "build" / "stable-id"
+        source = project_root / "src" / "probe.c"
+        object_path = build_dir / "obj" / "probe.obj"
+        response_path = build_dir / "rsp" / "probe.rsp"
+        include_dir = self.root / "sdk" / "include"
+        source.parent.mkdir(parents=True)
+        object_path.parent.mkdir(parents=True)
+        include_dir.mkdir(parents=True)
+        source.write_text("int probe(void) { return 0; }\n", encoding="utf-8", newline="\n")
+        toolchain = MSVCToolchain(
+            installation_path=self.root,
+            environment={},
+            cl=self.root / "cl.exe",
+            link=self.root / "link.exe",
+            lib=self.root / "lib.exe",
+            dumpbin=self.root / "dumpbin.exe",
+            msbuild=self.root / "msbuild.exe",
+            visual_studio_version="17.0",
+            vscmd_version="17.0",
+            vc_tools_version="14.40",
+            windows_sdk_version="10.0",
+        )
+        captured = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = command
+            captured["cwd"] = kwargs["cwd"]
+            object_path.write_bytes(b"object")
+            return ""
+
+        with mock.patch("pysuture.builder._run", side_effect=fake_run):
+            _compile_source(
+                toolchain,
+                source,
+                object_path,
+                response_path,
+                [include_dir],
+                (),
+                project_root,
+                build_dir,
+            )
+
+        arguments = response_path.read_text(encoding="utf-16").splitlines()
+        self.assertIn("/Brepro", arguments)
+        self.assertIn("/experimental:deterministic", arguments)
+        self.assertIn("/Z7", arguments)
+        self.assertIn("/ZH:SHA_256", arguments)
+        self.assertNotIn("/GL", arguments)
+        self.assertTrue(any(item.startswith(f"/pathmap:{include_dir}=") for item in arguments))
+        source_argument = next(item for item in arguments if item.endswith("probe.c"))
+        object_argument = next(item.removeprefix("/Fo") for item in arguments if item.startswith("/Fo"))
+        include_argument = next(item.removeprefix("/I") for item in arguments if item.startswith("/I"))
+        self.assertFalse(Path(source_argument).is_absolute())
+        self.assertFalse(Path(object_argument).is_absolute())
+        self.assertFalse(Path(include_argument).is_absolute())
+        self.assertEqual(captured["cwd"], build_dir)
+        self.assertFalse(Path(captured["command"][1].removeprefix("@")).is_absolute())
+
+    def test_link_libraries_are_staged_with_root_independent_paths(self) -> None:
+        libraries = []
+        for parent, payload in (("first", b"one"), ("second", b"two")):
+            source = self.root / "cache" / parent / "same-name.lib"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(payload)
+            libraries.append(source)
+
+        arguments = []
+        for project in ("short", "nested/longer/project"):
+            build_dir = self.root / project / ".pysuture" / "build" / "stable-id"
+            staged = _stage_link_libraries(libraries, build_dir)
+            arguments.append([_command_path(path, build_dir) for path in staged])
+            self.assertEqual([path.read_bytes() for path in staged], [b"one", b"two"])
+
+        self.assertEqual(arguments[0], arguments[1])
+        self.assertEqual(
+            arguments[0],
+            [
+                os.path.join("link-libraries", "0000", "same-name.lib"),
+                os.path.join("link-libraries", "0001", "same-name.lib"),
+            ],
+        )
+
+    @unittest.skipUnless(os.name == "nt", "MSVC command paths are Windows-specific")
+    def test_msvc_command_path_avoids_unresolved_legacy_path_limit(self) -> None:
+        source = (
+            self.root
+            / "shared-cache"
+            / "extracted"
+            / ("a" * 64)
+            / "src"
+            / "resources"
+            / "resource_000001.c"
+        ).resolve()
+        build_dir = self.root / "nested" / "project" / ".pysuture" / "build" / "stable-id"
+        while len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))) < 260:
+            build_dir = build_dir.parent / "deeper-location" / build_dir.name
+
+        self.assertLess(len(str(source)), 260)
+        self.assertGreaterEqual(
+            len(os.path.join(str(build_dir), os.path.relpath(source, build_dir))),
+            260,
+        )
+        self.assertEqual(_command_path(source, build_dir), str(source))
+
     def test_doctor_distinguishes_missing_and_malformed_lock(self) -> None:
         toolchain = MSVCToolchain(
             installation_path=self.root / "vs",
@@ -711,6 +999,68 @@ class CoreTests(unittest.TestCase):
                         [("attrs", pack)],
                         staticpython_commit=index["staticpython_commit"],
                     )
+
+    def test_pack_composition_requires_exact_owned_trusted_object_origin(self) -> None:
+        runtime = {
+            "link_libraries": [],
+            "frozen_module_names": [],
+            "builtin_module_registrations": [],
+        }
+        pack = {
+            "descriptor_symbol": "StaticPython_Pack_wxpython",
+            "libraries": ["wxbase32u.lib"],
+            "trusted_object_origins": [
+                {"library": "wxbase32u.lib", "object": "main.obj"},
+            ],
+            "frozen_modules": [],
+            "builtin_modules": [],
+            "resources": [],
+        }
+        validate_pack_composition(runtime, [("wxpython", pack)])
+
+        invalid_records = (
+            [{"library": "outside.lib", "object": "main.obj"}],
+            [{"library": "../wxbase32u.lib", "object": "main.obj"}],
+            [{"library": "wxbase32u.lib", "object": "other.obj"}],
+            [{"library": "wxbase32u.lib", "object": "main.obj", "extra": True}],
+        )
+        for value in invalid_records:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                LockError,
+                "trusted object",
+            ):
+                validate_pack_composition(
+                    runtime,
+                    [("wxpython", {**pack, "trusted_object_origins": value})],
+                )
+
+    def test_pack_composition_rejects_unsafe_or_duplicate_native_library_names(self) -> None:
+        runtime = {
+            "frozen_module_names": [],
+            "builtin_module_registrations": [],
+        }
+        pack = {
+            "descriptor_symbol": "StaticPython_Pack_demo",
+            "trusted_object_origins": [],
+            "frozen_modules": [],
+            "builtin_modules": [],
+            "resources": [],
+        }
+        invalid_values = (
+            "demo.lib",
+            ["../demo.lib"],
+            ["@demo.lib"],
+            ["demo.lib", "DEMO.LIB"],
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                LockError,
+                "libraries must be a list of plain .lib basenames|duplicate library",
+            ):
+                validate_pack_composition(
+                    runtime,
+                    [("demo", {**pack, "libraries": value})],
+                )
 
     def test_pack_runtime_contract_rejects_missing_locked_dependency(self) -> None:
         index = self._index()
@@ -984,6 +1334,251 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "credential"):
             collect_application_resources(config)
 
+    def test_secret_symlink_name_is_checked_before_resolution(self) -> None:
+        self._write_project("pass\n")
+        matched = self.root / ".env"
+        matched.write_text("placeholder\n", encoding="utf-8")
+        target = self.root / "public-config.txt"
+        target.write_text("ordinary data\n", encoding="utf-8")
+        resolved_target = target.resolve()
+        original_resolve = Path.resolve
+
+        def resolve_symlink_name(path: Path, *args: object, **kwargs: object) -> Path:
+            if path == matched:
+                return resolved_target
+            return original_resolve(path, *args, **kwargs)
+
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env", "config/settings.txt"),),
+        )
+        # Simulate symlink resolution without requiring Windows symlink
+        # privileges on the test runner.
+        with mock.patch.object(
+            Path, "resolve", autospec=True, side_effect=resolve_symlink_name
+        ):
+            with self.assertRaisesRegex(BuildError, r"credential.*\.env"):
+                collect_application_resources(config)
+
+    def test_wildcard_resource_accepts_windows_target_separator(self) -> None:
+        self._write_project("pass\n")
+        assets = self.root / "assets"
+        assets.mkdir()
+        (assets / "payload.txt").write_text("payload", encoding="utf-8")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("assets/*.txt", "embedded\\"),),
+        )
+
+        records, warnings = collect_application_resources(config)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual([record.target for record in records], ["embedded/payload.txt"])
+
+    def test_resource_collection_translates_a_late_read_failure(self) -> None:
+        self._write_project("pass\n")
+        payload = self.root / "payload.bin"
+        payload.write_bytes(b"payload")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("payload.bin", "assets/payload.bin"),),
+        )
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=OSError("gone")):
+            with self.assertRaisesRegex(BuildError, "could not read matched resource"):
+                collect_application_resources(config)
+
+    def test_resource_embedding_rejects_source_drift(self) -> None:
+        source = self.root / "payload.bin"
+        source.write_bytes(b"original")
+        record = ResourceRecord(
+            source=source,
+            target="assets/payload.bin",
+            sha256=sha256_bytes(b"original"),
+            size=8,
+        )
+        source.write_bytes(b"modified")
+        generated_dir = self.root / "generated"
+        with self.assertRaisesRegex(BuildError, "changed after collection"):
+            write_resource_sources([record], generated_dir)
+        self.assertFalse((generated_dir / "resource_000001.c").exists())
+
+    def test_resource_embedding_preflights_all_inputs_before_emitting_sources(self) -> None:
+        first = self.root / "first.bin"
+        second = self.root / "second.bin"
+        first.write_bytes(b"first")
+        second.write_bytes(b"changed")
+        records = [
+            ResourceRecord(
+                source=first,
+                target="assets/first.bin",
+                sha256=sha256_bytes(b"first"),
+                size=5,
+            ),
+            ResourceRecord(
+                source=second,
+                target="assets/second.bin",
+                sha256=sha256_bytes(b"original"),
+                size=8,
+            ),
+        ]
+        generated_dir = self.root / "generated"
+
+        with self.assertRaisesRegex(BuildError, "changed after collection"):
+            write_resource_sources(records, generated_dir)
+
+        self.assertFalse(generated_dir.exists())
+
+    def test_resource_embedding_rejects_cross_origin_target_collisions(self) -> None:
+        first = self.root / "application-license.txt"
+        second = self.root / "runtime-license.txt"
+        first.write_bytes(b"application")
+        second.write_bytes(b"runtime")
+        records = [
+            ResourceRecord(
+                source=first,
+                target="licenses/runtime-sdk/LICENSE.txt",
+                sha256=sha256_bytes(b"application"),
+                size=11,
+            ),
+            ResourceRecord(
+                source=second,
+                target="licenses/runtime-sdk/LICENSE.txt",
+                sha256=sha256_bytes(b"runtime"),
+                size=7,
+            ),
+        ]
+        with self.assertRaisesRegex(BuildError, "multiple resources map"):
+            write_resource_sources(records, self.root / "generated")
+
+    def test_resource_embedding_rejects_absolute_or_control_targets(self) -> None:
+        source = self.root / "payload.bin"
+        source.write_bytes(b"payload")
+        for target in (
+            "/assets/payload.bin",
+            "C:/assets/payload.bin",
+            r"C:\assets\payload.bin",
+            "C:drive-relative.bin",
+            "assets/./payload.bin",
+            "assets/bad\x00.bin",
+            "assets/bad\ud800.bin",
+        ):
+            with self.subTest(target=target):
+                record = ResourceRecord(
+                    source=source,
+                    target=target,
+                    sha256=sha256_bytes(b"payload"),
+                    size=7,
+                )
+                with self.assertRaisesRegex(BuildError, "safe relative virtual path"):
+                    write_resource_sources([record], self.root / "generated")
+
+    def test_resource_embedding_reports_removed_source(self) -> None:
+        source = self.root / "removed.bin"
+        source.write_bytes(b"present")
+        record = ResourceRecord(
+            source=source,
+            target="assets/removed.bin",
+            sha256=sha256_bytes(b"present"),
+            size=7,
+        )
+        source.unlink()
+        with self.assertRaisesRegex(BuildError, "could not reread collected resource"):
+            write_resource_sources([record], self.root / "generated")
+
+    def test_secret_resource_variants_and_private_key_content_are_rejected(self) -> None:
+        self._write_project("pass\n")
+        cases = {
+            ".env.production": "TOKEN=secret\n",
+            ".envrc": "export TOKEN=secret\n",
+            ".netrc": "machine example.invalid password secret\n",
+            "client_secret-production.json": '{"client_secret": "secret"}\n',
+            "id_ed25519.backup": "private material\n",
+            "secrets.toml": 'token = "secret"\n',
+            "renamed-config.txt": "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n",
+            "late-key.txt": "x" * (128 * 1024) + "-----BEGIN PRIVATE KEY-----\nsecret\n",
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                (self.root / name).write_text(payload, encoding="utf-8")
+                config = replace(
+                    load_project_config(self.root),
+                    data=(DataMapping(name, f"config/{name}"),),
+                )
+                with self.assertRaisesRegex(BuildError, "credential"):
+                    collect_application_resources(config)
+
+    def test_public_keys_and_certificates_are_not_treated_as_private(self) -> None:
+        self._write_project("pass\n")
+        (self.root / "id_ed25519.pub").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        (self.root / "id_ed25519.pub.backup").write_text(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest public@example\n",
+            encoding="utf-8",
+        )
+        (self.root / "certificate.pem").write_text(
+            "-----BEGIN CERTIFICATE-----\npublic certificate\n-----END CERTIFICATE-----\n",
+            encoding="utf-8",
+        )
+        config = replace(
+            load_project_config(self.root),
+            data=(
+                DataMapping("id_ed25519.pub", "keys/id_ed25519.pub"),
+                DataMapping("id_ed25519.pub.backup", "keys/id_ed25519.pub.backup"),
+                DataMapping("certificate.pem", "certificates/certificate.pem"),
+            ),
+        )
+
+        records, warnings = collect_application_resources(config)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            [record.target for record in records],
+            [
+                "certificates/certificate.pem",
+                "keys/id_ed25519.pub",
+                "keys/id_ed25519.pub.backup",
+            ],
+        )
+
+    def test_secret_resource_policy_can_warn_or_allow(self) -> None:
+        self._write_project("pass\n")
+        (self.root / ".env.local").write_text("TOKEN=secret\n", encoding="utf-8")
+        base = replace(
+            load_project_config(self.root),
+            data=(DataMapping(".env.local", "config/.env.local"),),
+        )
+        records, warnings = collect_application_resources(
+            replace(base, secret_policy="warn")
+        )
+        self.assertEqual([record.target for record in records], ["config/.env.local"])
+        self.assertEqual(len(warnings), 1)
+        _records, allowed_warnings = collect_application_resources(
+            replace(base, secret_policy="allow")
+        )
+        self.assertEqual(allowed_warnings, [])
+
+    def test_application_resource_read_failure_is_reported_as_build_error(self) -> None:
+        self._write_project("pass\n")
+        source = self.root / "payload.txt"
+        source.write_text("payload\n", encoding="utf-8")
+        config = replace(
+            load_project_config(self.root),
+            data=(DataMapping("payload.txt", "assets/payload.txt"),),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def fail_target(path: Path) -> bytes:
+            if path.resolve() == source.resolve():
+                raise OSError("injected read failure")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", autospec=True, side_effect=fail_target):
+            with self.assertRaisesRegex(BuildError, "could not read matched resource"):
+                collect_application_resources(config)
+
     def test_zip_extraction_rejects_parent_traversal(self) -> None:
         archive_path = self.root / "unsafe.zip"
         with ZipFile(archive_path, "w") as archive:
@@ -1232,11 +1827,31 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((destination / "new.txt").exists())
 
     def test_cython_generates_unique_init_and_launcher_has_no_generic_entry(self) -> None:
-        self._write_project("if __name__ == '__main__':\n    print('ok')\n")
+        self._write_project("import pkg\nimport other_pkg\nif __name__ == '__main__':\n    print('ok')\n")
+        (self.root / "other_pkg").mkdir()
+        (self.root / "other_pkg" / "__init__.py").write_text("VALUE = 2\n", encoding="utf-8")
         config = load_project_config(self.root)
         report = analyze_project(config)
         units, warnings = cythonize_modules(report, self.root / ".pysuture" / "test", installed_cython_version())
         self.assertTrue(all(unit.init_symbol.startswith("PyInit_pysuture_") for unit in units))
+        self.assertTrue(all("CYTHON_NO_PYINIT_EXPORT=1" in unit.compile_definitions for unit in units))
+        self.assertEqual(sum(unit.module.is_package for unit in units), 2)
+        package_units = [unit for unit in units if unit.module.is_package]
+        alias_targets: list[str] = []
+        for unit in package_units:
+            generated_text = unit.c_source.read_text(encoding="utf-8", errors="replace")
+            self.assertIn("PyInit___init__", generated_text)
+            alias_definitions = [
+                definition
+                for definition in unit.compile_definitions
+                if definition.startswith("PyInit___init__=")
+            ]
+            self.assertEqual(len(alias_definitions), 1)
+            alias_targets.append(alias_definitions[0].split("=", 1)[1])
+        self.assertEqual(len(alias_targets), len(set(alias_targets)))
+        self.assertTrue(
+            all(target.startswith("PyInit_pysuture_alias_") for target in alias_targets)
+        )
         launcher = write_launcher(
             self.root / ".pysuture" / "test" / "launcher.c",
             units=units,
@@ -1255,12 +1870,513 @@ class CoreTests(unittest.TestCase):
         self.assertIn("return argc == 4", text)
         self.assertIn('L"parent_pid="', text)
         self.assertIn('L"pipe_handle="', text)
+        self.assertIn("cursor[0] == L'0'", text)
+        self.assertIn('L"parent_pid=", UINT_MAX', text)
+        self.assertIn('L"pipe_handle=", ULLONG_MAX', text)
+        self.assertIn("CPython 3.11-3.15", text)
+        self.assertIn("argc != 5", text)
+        self.assertIn('wcscmp(argv[1], L"-B")', text)
+        self.assertIn('wcscmp(argv[2], L"-I")', text)
+        self.assertIn('wcscmp(argv[3], L"-c")', text)
+        self.assertIn("wcsncmp(argv[4], prefix", text)
+        self.assertIn("number[0] == L'0'", text)
+        self.assertIn("INT_MAX", text)
+        self.assertNotIn("_wcstoi64", text)
+        self.assertIn('PyImport_ImportModule("importlib.machinery")', text)
+        self.assertIn("pysuture_namespace_find_spec", text)
+        self.assertIn("PyModule_AddFunctions(finder, pysuture_namespace_finder_methods)", text)
+        self.assertIn("PyList_Append(meta_path, finder)", text)
+        self.assertNotIn("PyList_Insert(meta_path, 0, finder)", text)
+        self.assertIn('PyObject_SetAttrString(spec, "submodule_search_locations", locations)', text)
+        self.assertIn('    "ns",', text)
+        self.assertIn('    "ns.child",', text)
+        self.assertLess(
+            text.index("    if (pysuture_install_namespace_finder() < 0)"),
+            text.index("pysuture_dispatch_multiprocessing(argc, argv)"),
+        )
         self.assertIn("wmain(int argc", text)
         self.assertNotIn("Py_Main(", text)
         self.assertNotIn("Py_RunMain(", text)
         prepared = next(unit.prepared_source for unit in units if unit.module.name == "app")
         prepared_text = prepared.read_text(encoding="utf-8")
         self.assertIn("freeze_support", prepared_text)
+        package_prepared = next(unit.prepared_source for unit in units if unit.module.name == "pkg")
+        package_text = package_prepared.read_text(encoding="utf-8")
+        self.assertIn("__path__ = []", package_text)
+        self.assertIn("__spec__.submodule_search_locations = __path__", package_text)
+        self.assertNotIn("__path__ = [__name__]", package_text)
+
+    def test_freeze_support_is_prepended_before_guard_work(self) -> None:
+        tree = ast.parse(
+            "if __name__ == '__main__':\n"
+            "    start_children()\n"
+            "    from multiprocessing import freeze_support\n"
+            "    freeze_support()\n"
+        )
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        prepared = ast.unparse(tree)
+        reparsed_guard = ast.parse(prepared).body[0]
+        self.assertIsInstance(reparsed_guard, ast.If)
+        self.assertIsInstance(reparsed_guard.body[0], ast.Import)
+        self.assertIsInstance(reparsed_guard.body[1], ast.ImportFrom)
+        self.assertIsInstance(reparsed_guard.body[2], ast.FunctionDef)
+        self.assertTrue(
+            isinstance(reparsed_guard.body[3], ast.If)
+            and len(reparsed_guard.body[3].body) == 1
+            and isinstance(reparsed_guard.body[3].body[0], ast.Expr)
+            and isinstance(reparsed_guard.body[3].body[0].value, ast.Call)
+            and isinstance(reparsed_guard.body[3].body[0].value.func, ast.Name)
+            and reparsed_guard.body[3].body[0].value.func.id == "__pysuture_freeze_support"
+        )
+        self.assertIn("start_children()", prepared)
+        self.assertGreater(
+            prepared.index("start_children()"),
+            prepared.index("__pysuture_freeze_support()"),
+        )
+
+    def test_injected_freeze_support_only_accepts_exact_windows_child_signature(self) -> None:
+        tree = ast.parse("if __name__ == '__main__':\n    start_children()\n")
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        ast.fix_missing_locations(tree)
+        prepared = compile(tree, "<prepared-entry>", "exec")
+        cases = (
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=2"], True),
+            (
+                [
+                    "--multiprocessing-fork",
+                    "parent_pid=4294967295",
+                    "pipe_handle=18446744073709551615",
+                ],
+                True,
+            ),
+            (["--multiprocessing-fork", "parent_pid=4294967296", "pipe_handle=2"], False),
+            (["--multiprocessing-fork", "parent_pid=01", "pipe_handle=2"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=02"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=+1"], False),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=١"], False),
+            (["-c", "print('application argument')"], False),
+        )
+        for arguments, expected_call in cases:
+            with self.subTest(arguments=arguments):
+                start_children = mock.Mock()
+                with (
+                    mock.patch.object(sys, "argv", ["demo.exe", *arguments]),
+                    mock.patch("multiprocessing.freeze_support") as freeze_support,
+                ):
+                    exec(
+                        prepared,
+                        {"__name__": "__main__", "start_children": start_children},
+                    )
+                self.assertEqual(freeze_support.called, expected_call)
+                start_children.assert_called_once_with()
+
+    def test_existing_freeze_support_prelude_is_not_duplicated(self) -> None:
+        tree = ast.parse(
+            "if __name__ == '__main__':\n"
+            "    from multiprocessing import freeze_support\n"
+            "    freeze_support()\n"
+            "    start_children()\n"
+        )
+        guard = tree.body[0]
+        self.assertIsInstance(guard, ast.If)
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), 6)
+        self.assertFalse(
+            any(
+                isinstance(call.func, ast.Name) and call.func.id == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
+        )
+
+    def test_aliased_freeze_support_calls_are_replaced_by_strict_dispatch(self) -> None:
+        sources = (
+            (
+                "from multiprocessing import freeze_support as fs\nfs()\nstart_children()\n",
+                "fs",
+            ),
+            (
+                "import multiprocessing as mp\nmp.freeze_support()\nstart_children()\n",
+                "mp",
+            ),
+        )
+        for source, binding in sources:
+            with self.subTest(source=source):
+                guard = ast.If(
+                    test=ast.Constant(value=True),
+                    body=ast.parse(source).body,
+                    orelse=[],
+                )
+                _ensure_freeze_support_prelude(guard)
+                self.assertEqual(len(guard.body), 6)
+                remaining_calls = [
+                    call
+                    for statement in guard.body
+                    if (call := _no_argument_call(statement)) is not None
+                ]
+                self.assertFalse(
+                    any(
+                        (isinstance(call.func, ast.Name) and call.func.id == binding)
+                        or (
+                            isinstance(call.func, ast.Attribute)
+                            and isinstance(call.func.value, ast.Name)
+                            and call.func.value.id == binding
+                            and call.func.attr == "freeze_support"
+                        )
+                        for call in remaining_calls
+                    )
+                )
+
+    def test_module_level_freeze_support_is_strictly_routed(self) -> None:
+        sources = (
+            "from multiprocessing import freeze_support\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support()\n"
+            "    start_children()\n",
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    mp.freeze_support()\n"
+            "    start_children()\n",
+        )
+        cases = (
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=2"], True),
+            (["--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle"], False),
+            (["-c", "print('application argument')"], False),
+        )
+        for source in sources:
+            tree = ast.parse(source)
+            guard_index = next(
+                index for index, statement in enumerate(tree.body) if isinstance(statement, ast.If)
+            )
+            guard = tree.body[guard_index]
+            self.assertIsInstance(guard, ast.If)
+            direct_names, module_names = _freeze_support_bindings(tree.body[:guard_index])
+            _ensure_freeze_support_prelude(
+                guard,
+                direct_names=direct_names,
+                module_names=module_names,
+            )
+            ast.fix_missing_locations(tree)
+            prepared = compile(tree, "<canonical-freeze-support>", "exec")
+            for arguments, expected_call in cases:
+                with self.subTest(source=source, arguments=arguments):
+                    start_children = mock.Mock()
+                    with (
+                        mock.patch.object(sys, "argv", ["demo.exe", *arguments]),
+                        mock.patch("multiprocessing.freeze_support") as freeze_support,
+                    ):
+                        exec(
+                            prepared,
+                            {"__name__": "__main__", "start_children": start_children},
+                        )
+                    self.assertEqual(freeze_support.called, expected_call)
+                    start_children.assert_called_once_with()
+
+    def test_entry_preparation_replaces_module_level_freeze_support(self) -> None:
+        self._write_project(
+            "import multiprocessing\n"
+            "if __name__ == '__main__':\n"
+            "    multiprocessing.freeze_support()\n"
+            "    application_started = True\n"
+        )
+        report = analyze_project(load_project_config(self.root))
+        prepared_path, guard_found = _prepare_module_source(
+            report.modules[report.entry_module],
+            self.root / ".pysuture" / "prepared-entry.py",
+            entry=True,
+        )
+        self.assertTrue(guard_found)
+        tree = ast.parse(prepared_path.read_text(encoding="utf-8"))
+        guard = next(statement for statement in tree.body if isinstance(statement, ast.If))
+        self.assertFalse(
+            any(
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "multiprocessing"
+                and call.func.attr == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(statement, ast.If)
+                and any(
+                    (call := _no_argument_call(child)) is not None
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "__pysuture_freeze_support"
+                    for child in statement.body
+                )
+                for statement in guard.body
+            )
+        )
+
+    def test_rebound_freeze_support_name_is_not_removed(self) -> None:
+        tree = ast.parse(
+            "from multiprocessing import freeze_support\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support = application_hook\n"
+            "    freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+        self.assertTrue(
+            any(
+                isinstance(call.func, ast.Name) and call.func.id == "freeze_support"
+                for statement in guard.body
+                if (call := _no_argument_call(statement)) is not None
+            )
+        )
+
+    def test_custom_freeze_support_rebindings_are_not_removed(self) -> None:
+        sources = (
+            "import multiprocessing\n"
+            "multiprocessing.freeze_support = application_hook\n"
+            "if __name__ == '__main__':\n"
+            "    multiprocessing.freeze_support()\n",
+            "from multiprocessing import freeze_support\n"
+            "if use_application_hook:\n"
+            "    freeze_support = application_hook\n"
+            "if __name__ == '__main__':\n"
+            "    freeze_support()\n",
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if use_application_hook:\n"
+            "        mp.freeze_support = application_hook\n"
+            "    mp.freeze_support()\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                guard_index = next(
+                    index
+                    for index, statement in enumerate(tree.body)
+                    if isinstance(statement, ast.If) and _is_main_guard(statement.test)
+                )
+                guard = tree.body[guard_index]
+                self.assertIsInstance(guard, ast.If)
+                direct_names, module_names = _freeze_support_bindings(
+                    tree.body[:guard_index]
+                )
+                _ensure_freeze_support_prelude(
+                    guard,
+                    direct_names=direct_names,
+                    module_names=module_names,
+                )
+                self.assertTrue(
+                    any(
+                        (
+                            isinstance(call.func, ast.Name)
+                            and call.func.id == "freeze_support"
+                        )
+                        or (
+                            isinstance(call.func, ast.Attribute)
+                            and call.func.attr == "freeze_support"
+                            and isinstance(call.func.value, ast.Name)
+                            and call.func.value.id in {"multiprocessing", "mp"}
+                        )
+                        for statement in guard.body
+                        if (call := _no_argument_call(statement)) is not None
+                    )
+                )
+
+    def test_nested_canonical_freeze_support_calls_are_removed(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if condition:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        from multiprocessing import freeze_support as fs\n"
+            "        fs()\n"
+            "    try:\n"
+            "        mp.freeze_support()\n"
+            "    except Exception:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    finally:\n"
+            "        mp.freeze_support()\n"
+            "    for item in items:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    while condition:\n"
+            "        mp.freeze_support()\n"
+            "    else:\n"
+            "        mp.freeze_support()\n"
+            "    with context_manager():\n"
+            "        mp.freeze_support()\n"
+            "    match value:\n"
+            "        case 1:\n"
+            "            mp.freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+
+        remaining_calls = [
+            node
+            for node in ast.walk(guard)
+            if isinstance(node, ast.Call)
+            and (
+                (
+                    isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "mp"
+                    and node.func.attr == "freeze_support"
+                )
+                or (isinstance(node.func, ast.Name) and node.func.id == "fs")
+            )
+        ]
+        self.assertEqual(remaining_calls, [])
+
+    def test_nested_canonical_freeze_support_does_not_consume_malformed_argv(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing\n"
+            "if __name__ == '__main__':\n"
+            "    if True:\n"
+            "        multiprocessing.freeze_support()\n"
+            "    try:\n"
+            "        application_started()\n"
+            "    finally:\n"
+            "        multiprocessing.freeze_support()\n"
+            "    application_started()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+        ast.fix_missing_locations(tree)
+        prepared = compile(tree, "<nested-freeze-support>", "exec")
+        application_started = mock.Mock()
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "demo.exe",
+                    "--multiprocessing-fork",
+                    "parent_pid=1",
+                    "pipe_handle=not-a-handle",
+                ],
+            ),
+            mock.patch("multiprocessing.freeze_support") as freeze_support,
+        ):
+            exec(
+                prepared,
+                {
+                    "__name__": "__main__",
+                    "application_started": application_started,
+                },
+            )
+        freeze_support.assert_not_called()
+        self.assertEqual(application_started.call_count, 2)
+
+    def test_nested_custom_freeze_support_rebinding_is_preserved(self) -> None:
+        tree = ast.parse(
+            "import multiprocessing as mp\n"
+            "if __name__ == '__main__':\n"
+            "    if use_application_hook:\n"
+            "        mp.freeze_support = application_hook\n"
+            "        mp.freeze_support()\n"
+        )
+        guard = tree.body[1]
+        self.assertIsInstance(guard, ast.If)
+        direct_names, module_names = _freeze_support_bindings(tree.body[:1])
+
+        _ensure_freeze_support_prelude(
+            guard,
+            direct_names=direct_names,
+            module_names=module_names,
+        )
+
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "mp"
+                and node.func.attr == "freeze_support"
+                for node in ast.walk(guard)
+            )
+        )
+
+    def test_unverified_bare_freeze_support_call_gets_canonical_prelude(self) -> None:
+        guard = ast.If(
+            test=ast.Constant(value=True),
+            body=ast.parse("freeze_support()\nstart_children()\n").body,
+            orelse=[],
+        )
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), 6)
+        self.assertIsInstance(guard.body[0], ast.Import)
+        self.assertIsInstance(guard.body[1], ast.ImportFrom)
+        self.assertIsInstance(guard.body[2], ast.FunctionDef)
+        self.assertIsInstance(guard.body[3], ast.If)
+        call = _no_argument_call(guard.body[3].body[0])
+        self.assertIsNotNone(call)
+        self.assertIsInstance(call.func, ast.Name)
+        self.assertEqual(call.func.id, "__pysuture_freeze_support")
+
+    def test_injected_strict_freeze_support_prelude_is_idempotent(self) -> None:
+        guard = ast.If(
+            test=ast.Constant(value=True),
+            body=ast.parse("start_children()\n").body,
+            orelse=[],
+        )
+        _ensure_freeze_support_prelude(guard)
+        length = len(guard.body)
+        _ensure_freeze_support_prelude(guard)
+        self.assertEqual(len(guard.body), length)
+    def test_cython_output_is_independent_of_project_root(self) -> None:
+        generated = []
+        for location in ("first-location", "second-location"):
+            project_root = self.root / location / "project"
+            source_root = project_root / "src"
+            source_root.mkdir(parents=True)
+            source = source_root / "app.py"
+            source.write_text("VALUE = __file__\n", encoding="utf-8", newline="\n")
+            record = ModuleRecord("app", source, False, source_root)
+            report = AnalysisReport(
+                entry_module="app",
+                modules={"app": record},
+                reachable_modules=("app",),
+                namespace_packages=(),
+                import_graph={"app": ()},
+                external_imports=(),
+                dynamic_imports=(),
+                dynamic_gaps=(),
+            )
+            units, _warnings = cythonize_modules(
+                report,
+                project_root / ".pysuture" / "build" / "stable-id",
+                installed_cython_version(),
+            )
+            generated.append(units[0].c_source.read_bytes())
+        self.assertEqual(generated[0], generated[1])
 
     def test_root_dunder_main_registers_one_builtin_entry(self) -> None:
         self._write_project("print('ok')\n")

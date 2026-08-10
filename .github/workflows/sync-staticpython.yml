@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Download newest verified prerelease index
+      - name: Download exact or newest verified prerelease index
         env:
           EXPECTED_STATICPYTHON_COMMIT: ${{ github.event.client_payload.staticpython_commit || inputs.staticpython_commit }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,12 +48,22 @@ jobs:
           @'
           import json
           import os
+          import re
           from pathlib import Path
           from pysuture.cache import fetch_index
-          payload, _ = fetch_index("github+latest://xqy2006/StaticPython/runtime-index.v1.json")
           expected = os.environ.get("EXPECTED_STATICPYTHON_COMMIT", "").strip()
+          if expected:
+              if not re.fullmatch(r"[0-9a-f]{40}", expected):
+                  raise RuntimeError("expected StaticPython commit must be 40 lowercase hex characters")
+              source = (
+                  "https://github.com/xqy2006/StaticPython/releases/download/"
+                  f"staticpython-runtime-{expected[:12]}/runtime-index.v1.json"
+              )
+          else:
+              source = "github+latest://xqy2006/StaticPython/runtime-index.v1.json"
+          payload, _ = fetch_index(source)
           if expected and json.loads(payload)["staticpython_commit"] != expected:
-              raise RuntimeError("latest verified index does not match the dispatched StaticPython commit")
+              raise RuntimeError("immutable verified index does not match the dispatched StaticPython commit")
           Path("candidate-index.json").write_bytes(payload)
           '@ | python -
       - name: Read candidate metadata
@@ -124,24 +134,82 @@ jobs:
         run: |
           $work = Join-Path $env:RUNNER_TEMP "pysuture-runtime-${{ matrix.python }}"
           New-Item -ItemType Directory -Force $work | Out-Null
-          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $work
+          $exe = Join-Path $work "smoke-${{ matrix.python }}-console.exe"
+          Copy-Item ".\examples\smoke\dist\smoke-${{ matrix.python }}-console.exe" $exe
+          $decoy = Join-Path $work "regular_pkg"
+          New-Item -ItemType Directory -Force $decoy | Out-Null
+          Set-Content -Path (Join-Path $decoy "injected.py") -Value "raise RuntimeError('external module loaded')" -Encoding utf8
           $before = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           $env:TEMP = $work
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          Push-Location $work
-          try {
-            & ".\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
-            if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          Set-Location $work
+          & "$work\smoke-${{ matrix.python }}-console.exe" --self-test "参数 空格" "路径-中文"
+          if ($LASTEXITCODE -ne 0) { throw "smoke executable failed with $LASTEXITCODE" }
+          $env:PYSUTURE_SMOKE_ARGV_PROBE = "1"
+          $probeCases = @(
+            [pscustomobject]@{ Args = @("-c", "print('must not run')", "-m", "not.a.module", "argument with spaces") },
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=not-a-handle") },
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=01", "pipe_handle=2") },
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=4294967296", "pipe_handle=2") },
+            [pscustomobject]@{ Args = @("--multiprocessing-fork", "parent_pid=1", "pipe_handle=18446744073709551616") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-I", "-B", "-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-B", "-c", "from multiprocessing.resource_tracker import main;main(7)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "print('application argument')") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(-1)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(+1)") },
+            [pscustomobject]@{ Args = @("-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(not-a-handle)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(-1)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(+1)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(00)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(2147483648)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(9223372036854775808)") },
+            [pscustomobject]@{ Args = @("-B", "-I", "-c", "from multiprocessing.forkserver import main; main(3, 4, [], **{})") }
+          )
+          foreach ($probeCase in $probeCases) {
+            $probeArgs = [object[]]$probeCase.Args
+            $probeOutput = @(& "$work\smoke-${{ matrix.python }}-console.exe" @probeArgs)
+            if ($LASTEXITCODE -ne 0) { throw "argv probe failed with $LASTEXITCODE" }
+            $probe = $probeOutput[-1] | ConvertFrom-Json
+            $expected = ConvertTo-Json -Compress -InputObject ([object[]]$probeArgs)
+            $actual = ConvertTo-Json -Compress -InputObject ([object[]]$probe.argv)
+            if ($actual -ne $expected) {
+              throw "argv was not preserved: expected $expected, got $actual"
+            }
           }
-          finally {
-            Pop-Location
+          $trackerInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $trackerInfo.FileName = "$work\smoke-${{ matrix.python }}-console.exe"
+          $trackerInfo.UseShellExecute = $false
+          $trackerInfo.RedirectStandardInput = $true
+          $trackerInfo.RedirectStandardOutput = $true
+          $trackerInfo.RedirectStandardError = $true
+          @("-B", "-I", "-c", "from multiprocessing.resource_tracker import main;main(0)") |
+            ForEach-Object { [void]$trackerInfo.ArgumentList.Add($_) }
+          $trackerProcess = [System.Diagnostics.Process]::new()
+          $trackerProcess.StartInfo = $trackerInfo
+          if (-not $trackerProcess.Start()) { throw "resource tracker probe did not start" }
+          $trackerProcess.StandardInput.Close()
+          if (-not $trackerProcess.WaitForExit(30000)) {
+            $trackerProcess.Kill($true)
+            throw "resource tracker probe timed out"
           }
+          $trackerOutput = $trackerProcess.StandardOutput.ReadToEnd()
+          $trackerError = $trackerProcess.StandardError.ReadToEnd()
+          if ($trackerProcess.ExitCode -ne 0) {
+            throw "resource tracker probe failed with $($trackerProcess.ExitCode): $trackerError"
+          }
+          if ($trackerOutput.Trim()) {
+            throw "exact resource tracker signature reached the application: $trackerOutput"
+          }
+          Remove-Item Env:PYSUTURE_SMOKE_ARGV_PROBE
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "runtime created or extracted files" }
-      - name: Windowed startup smoke
+      - name: Windowed Unicode, resource, argv, and multiprocessing smoke
         if: matrix.mode == 'windowed'
         shell: pwsh
         run: |
@@ -155,15 +223,66 @@ jobs:
           $env:TMP = $work
           Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
           Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-          $process = Start-Process $exe `
-            -ArgumentList @("--quiet") `
-            -WorkingDirectory $work `
-            -Wait `
-            -PassThru `
-            -WindowStyle Hidden
-          if ($process.ExitCode -ne 0) { throw "windowed executable failed with $($process.ExitCode)" }
+          Set-Location $work
+          $windowInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $windowInfo.FileName = $exe
+          $windowInfo.WorkingDirectory = $work
+          $windowInfo.UseShellExecute = $false
+          @("--self-test", "参数 空格", "路径-中文") |
+            ForEach-Object { [void]$windowInfo.ArgumentList.Add($_) }
+          $windowProcess = [System.Diagnostics.Process]::new()
+          $windowProcess.StartInfo = $windowInfo
+          if (-not $windowProcess.Start()) { throw "windowed executable did not start" }
+          if (-not $windowProcess.WaitForExit(180000)) {
+            $windowProcess.Kill($true)
+            throw "windowed multiprocessing smoke timed out"
+          }
+          if ($windowProcess.ExitCode -ne 0) {
+            throw "windowed executable failed with $($windowProcess.ExitCode)"
+          }
           $after = @(Get-ChildItem $work -Force -Recurse | Select-Object -ExpandProperty FullName)
           if (Compare-Object $before $after) { throw "windowed runtime created or extracted files" }
+
+  determinism:
+    needs: candidate
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: staticpython-candidate-index
+          path: candidate
+      - name: Install locked build frontend
+        run: python -m pip install -e ".[build]"
+      - name: Build the same frozen lock below two roots
+        shell: pwsh
+        run: |
+          python .\scripts\check_frozen_lock_determinism.py `
+            --project .\examples\smoke `
+            --index .\candidate\candidate-index.json `
+            --python "3.13" `
+            --mode console `
+            --output pysuture-determinism `
+            --work-root "$env:RUNNER_TEMP\pysuture-frozen-lock-determinism" `
+            --keep
+      - name: Upload determinism diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-lock-determinism-diagnostics
+          path: |
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/first-project/.pysuture/build/**/*.rsp
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/build-report.json
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.map
+            ${{ runner.temp }}/pysuture-frozen-lock-determinism/nested/second-location-with-a-different-length/project/.pysuture/build/**/*.rsp
+          if-no-files-found: warn
+          include-hidden-files: true
 
   ui-pack-e2e:
     needs: candidate
@@ -225,12 +344,42 @@ jobs:
             if ($fltk.Count -ne 1 -or @($fltk[0].system_libraries) -notcontains "gdiplus.lib") {
               throw "pyfltk lock record does not request gdiplus.lib"
             }
+            $trustedWxMain = @($wx[0].trusted_object_origins | Where-Object {
+              [string]$_.object -ieq "main.obj" -and
+              [string]$_.library -match '^wxbase[0-9]+u\.lib$'
+            })
+            if ($trustedWxMain.Count -ne 1) {
+              throw "wxpython lock record must declare exactly one trusted wxbase main.obj origin"
+            }
             pysuture build `
               --python "${{ matrix.python }}" `
               --mode console `
               --output "wx-fltk-${{ matrix.python }}" `
               --frozen-lock
             if ($LASTEXITCODE -ne 0) { throw "pysuture build failed with $LASTEXITCODE" }
+            $buildReports = @(
+              Get-ChildItem -LiteralPath .\.pysuture\build -Filter build-report.json -File -Recurse
+            )
+            if ($buildReports.Count -ne 1) {
+              throw "Expected exactly one UI build report, found $($buildReports.Count)"
+            }
+            $buildReport = Get-Content -LiteralPath $buildReports[0].FullName -Raw | ConvertFrom-Json
+            $pe = $buildReport.pe_audit
+            $forbiddenEvidence = @(
+              @($pe.forbidden_dependencies)
+              @($pe.non_system_dependencies)
+              @($pe.forbidden_entry_symbols)
+              @($pe.forbidden_main_object_records)
+            )
+            if ($pe.status -ne "passed" -or $forbiddenEvidence.Count -ne 0) {
+              throw "UI executable failed its PE import/object audit: $($forbiddenEvidence -join ', ')"
+            }
+            if (@($pe.dependencies).Count -eq 0) {
+              throw "UI executable PE audit recorded no Windows imports"
+            }
+            if (@($pe.allowed_trusted_object_records).Count -eq 0) {
+              throw "UI executable PE audit did not bind wxbase main.obj to trusted pack metadata"
+            }
           }
           finally {
             Pop-Location
@@ -272,12 +421,13 @@ jobs:
 
   propose-update:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.propose_update }}
-    needs: [candidate, e2e, ui-pack-e2e]
+    needs: [candidate, e2e, determinism, ui-pack-e2e]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -292,20 +442,87 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          if (-not (git status --porcelain)) {
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          git diff --quiet -- runtime-catalog.lock.json
+          $catalogDiffExit = $LASTEXITCODE
+          if ($catalogDiffExit -eq 0) {
             Write-Host "Catalog already points at this verified StaticPython commit"
             exit 0
           }
+          if ($catalogDiffExit -ne 1) {
+            throw "Could not compare the reviewed catalog with master"
+          }
           $branch = "sync/staticpython-${{ needs.candidate.outputs.short_commit }}"
           $existing = gh pr list --state open --head $branch --json url --jq '.[0].url'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query existing StaticPython update pull requests"
+          }
           if (-not [string]::IsNullOrWhiteSpace($existing)) {
             Write-Host "An update PR already exists for this verified candidate: $existing"
             exit 0
           }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b $branch
-          git add runtime-catalog.lock.json
-          git commit -m "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}"
-          git push origin $branch
-          gh pr create --base master --head $branch --title "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}" --body "All five CPython targets and console/windowed representative applications passed. This PR only updates the reviewed catalog pointer; it does not auto-merge." --draft
+
+          $closed = gh pr list --state closed --head $branch --json url --jq '.[0].url'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query closed StaticPython update pull requests"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($closed)) {
+            Write-Warning "A closed update PR already records this verified candidate: $closed"
+            "### StaticPython catalog proposal`n`nA closed proposal already records this candidate: $closed" |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+
+          $remoteLines = @(git ls-remote --heads origin "refs/heads/$branch")
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query the StaticPython update branch"
+          }
+          $remoteLines = @($remoteLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($remoteLines.Count -gt 1) {
+            throw "Expected at most one remote StaticPython update branch, found $($remoteLines.Count)"
+          }
+
+          if ($remoteLines.Count -eq 1) {
+            git fetch --no-tags origin "refs/heads/$branch"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not fetch existing StaticPython update branch $branch"
+            }
+            $changedPaths = @(git diff --name-only "origin/master...FETCH_HEAD")
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not audit existing StaticPython update branch $branch"
+            }
+            if ($changedPaths.Count -ne 1 -or $changedPaths[0] -ne "runtime-catalog.lock.json") {
+              throw "Existing update branch $branch contains changes outside runtime-catalog.lock.json"
+            }
+            git diff --quiet FETCH_HEAD -- runtime-catalog.lock.json
+            if ($LASTEXITCODE -ne 0) {
+              throw "Existing update branch $branch does not contain this exact verified catalog"
+            }
+            Write-Host "Verified existing orphan update branch $branch; retrying PR creation"
+          } else {
+            git config user.name "github-actions[bot]"
+            if ($LASTEXITCODE -ne 0) { throw "Could not configure the proposal author name" }
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            if ($LASTEXITCODE -ne 0) { throw "Could not configure the proposal author email" }
+            git checkout -b $branch
+            if ($LASTEXITCODE -ne 0) { throw "Could not create update branch $branch" }
+            git add runtime-catalog.lock.json
+            if ($LASTEXITCODE -ne 0) { throw "Could not stage the reviewed catalog" }
+            git commit -m "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}"
+            if ($LASTEXITCODE -ne 0) { throw "Could not commit the reviewed catalog" }
+            git push --set-upstream origin $branch
+            if ($LASTEXITCODE -ne 0) { throw "Could not publish update branch $branch" }
+          }
+
+          $proposal = gh pr create --base master --head $branch --title "Sync verified StaticPython ${{ needs.candidate.outputs.short_commit }}" --body "All five CPython targets and console/windowed representative applications passed. This PR only updates the reviewed catalog pointer; it does not auto-merge." --draft 2>&1 | Out-String
+          $proposalExit = $LASTEXITCODE
+          if ($proposalExit -ne 0) {
+            $compareUrl = "https://github.com/${{ github.repository }}/compare/master...${branch}?expand=1"
+            Write-Warning "The verified update branch is published, but GitHub Actions could not create its draft PR. Create it from $compareUrl"
+            Write-Host $proposal.Trim()
+            "### StaticPython catalog proposal`n`nThe verified branch ``$branch`` is ready, but repository policy prevented Actions from creating its draft PR. [Create the draft PR manually]($compareUrl)." |
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          Write-Host $proposal.Trim()

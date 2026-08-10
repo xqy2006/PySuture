@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import email
+import importlib
+import importlib.util
 import json
 import multiprocessing
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import attrs
 import regex
+import regular_pkg
+import sibling_pkg
+import smoke_ns
+from regular_pkg import package_value
+from sibling_pkg import sibling_value
+from smoke_ns.child.probe import namespace_value
 
 
 @attrs.define(frozen=True)
@@ -43,6 +53,8 @@ def nested_parent(queue, value: int) -> None:
 
 
 def self_test() -> int:
+    if sys.argv[1:] != ["--self-test", "参数 空格", "路径-中文"]:
+        return 9
     payload = json.loads(Path("assets/payload.json").read_text(encoding="utf-8"))
     if payload != {"message": "静态资源", "ok": True}:
         return 10
@@ -52,6 +64,46 @@ def self_test() -> int:
     match = regex.fullmatch(r"\p{Letter}+", "路径中文")
     if match is None or match.group(0) != "路径中文":
         return 17
+    namespace_spec = importlib.util.find_spec("smoke_ns")
+    child_spec = importlib.util.find_spec("smoke_ns.child")
+    if (
+        namespace_spec is None
+        or namespace_spec.loader is None
+        or namespace_spec.loader is not smoke_ns.__loader__
+        or namespace_spec.submodule_search_locations is None
+        or namespace_spec.submodule_search_locations is not smoke_ns.__path__
+        or list(smoke_ns.__path__) != []
+        or child_spec is None
+        or child_spec.loader is None
+        or child_spec.loader is not smoke_ns.child.__loader__
+        or child_spec.submodule_search_locations is None
+        or child_spec.submodule_search_locations is not smoke_ns.child.__path__
+        or list(smoke_ns.child.__path__) != []
+        or smoke_ns.child is not sys.modules["smoke_ns.child"]
+        or namespace_value() != "namespace-ok"
+    ):
+        return 18
+    # ``email`` also has an application namespace portion under this source
+    # tree. Its regular frozen stdlib package must win over that portion.
+    if not callable(getattr(email, "message_from_string", None)):
+        return 19
+    if (
+        list(regular_pkg.__path__) != []
+        or regular_pkg.__spec__ is None
+        or regular_pkg.__spec__.submodule_search_locations is not regular_pkg.__path__
+        or package_value() != "package-ok"
+        or list(sibling_pkg.__path__) != []
+        or sibling_pkg.__spec__ is None
+        or sibling_pkg.__spec__.submodule_search_locations is not sibling_pkg.__path__
+        or sibling_value() != "sibling-ok"
+    ):
+        return 20
+    try:
+        importlib.import_module("regular_pkg.injected")
+    except ModuleNotFoundError:
+        pass
+    else:
+        return 21
     context = multiprocessing.get_context("spawn")
     queue = context.Queue()
     process = context.Process(target=queue_worker, args=(queue,))
@@ -89,5 +141,15 @@ def self_test() -> int:
     return 0
 
 
+def argv_probe() -> int:
+    print(json.dumps({"argv": sys.argv[1:]}, ensure_ascii=False))
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(self_test() if "--self-test" in sys.argv else 0)
+    multiprocessing.freeze_support()
+    if "--self-test" in sys.argv:
+        raise SystemExit(self_test())
+    if os.environ.get("PYSUTURE_SMOKE_ARGV_PROBE") == "1":
+        raise SystemExit(argv_probe())
+    raise SystemExit(0)

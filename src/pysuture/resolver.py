@@ -47,6 +47,7 @@ LOCKED_METADATA_OPTIONAL_FIELDS = (
     "link_libraries",
     "stdlib_top_level_import_names",
     "builtin_module_names",
+    "trusted_object_origins",
 )
 
 # VsDevCmd's own version can change independently of the compiler and linker.
@@ -80,6 +81,43 @@ def _validate_plain_library_names(value: object, *, owner: str, field: str) -> l
         seen.add(key)
         names.append(name)
     return names
+
+
+def _validate_trusted_object_origins(
+    value: object,
+    *,
+    owner: str,
+    native_libraries: list[str],
+) -> list[tuple[str, str]]:
+    if not isinstance(value, list):
+        raise LockError(f"{owner} trusted_object_origins must be a list")
+    owned = {name.casefold(): name for name in native_libraries}
+    origins: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in value:
+        if not isinstance(record, dict) or set(record) != {"library", "object"}:
+            raise LockError(
+                f"{owner} trusted object origins must contain only library and object"
+            )
+        library = record.get("library")
+        object_name = record.get("object")
+        if not isinstance(library, str) or PLAIN_LIBRARY_NAME_PATTERN.fullmatch(library) is None:
+            raise LockError(f"{owner} trusted object library must be a plain .lib basename")
+        owned_library = owned.get(library.casefold())
+        if owned_library is None:
+            raise LockError(f"{owner} trusted object library is missing from libraries: {library}")
+        if not isinstance(object_name, str) or object_name.casefold() != "main.obj":
+            raise LockError(
+                f"{owner} trusted object must currently be the exact basename main.obj"
+            )
+        key = (owned_library.casefold(), "main.obj")
+        if key in seen:
+            raise LockError(
+                f"{owner} trusted_object_origins contains duplicate origin {owned_library}(main.obj)"
+            )
+        seen.add(key)
+        origins.append((owned_library, "main.obj"))
+    return origins
 
 
 def _locked_metadata_projection(metadata: dict) -> dict:
@@ -360,6 +398,13 @@ def _is_stdlib(name: str, runtime_metadata: dict | None = None) -> bool:
     return name in sys.stdlib_module_names or name in WINDOWS_STDLIB_MODULES
 
 
+def _local_namespace_roots(report: AnalysisReport) -> set[str]:
+    return {
+        name.split(".", 1)[0]
+        for name in report.namespace_packages
+    }
+
+
 def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dict]]) -> None:
     claimed_frozen: dict[str, str] = {}
     claimed_builtins: dict[str, str] = {"_staticpython_resource_store": "runtime SDK"}
@@ -427,6 +472,11 @@ def validate_pack_composition(runtime_metadata: dict, packs: list[tuple[str, dic
                 f"pack {owner} native libraries conflict with the runtime SDK: "
                 + ", ".join(runtime_collisions)
             )
+        _validate_trusted_object_origins(
+            metadata.get("trusted_object_origins", []),
+            owner=f"pack {owner}",
+            native_libraries=native_libraries,
+        )
         descriptor = metadata.get("descriptor_symbol")
         claim(claimed_descriptors, descriptor, owner, "descriptor symbol")
         frozen_modules = metadata.get("frozen_modules", [])
@@ -617,6 +667,7 @@ def resolve_assets(
         raise LockError(f"runtime SDK ABI mismatch: expected {expected_runtime_abi}")
 
     top_level = _top_level_map(index, abi)
+    local_namespace_roots = _local_namespace_roots(report)
     requested: dict[str, str] = dict(config.packages)
     unresolved: set[str] = set()
     for import_name in report.external_imports:
@@ -624,7 +675,10 @@ def resolve_assets(
             continue
         providers = top_level.get(import_name, set())
         if not providers:
-            if import_name not in config.include_packages:
+            if (
+                import_name not in config.include_packages
+                and import_name not in local_namespace_roots
+            ):
                 unresolved.add(import_name)
             continue
         explicitly_requested = [name for name in providers if name in requested]

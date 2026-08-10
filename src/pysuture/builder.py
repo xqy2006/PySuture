@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .analyzer import AnalysisReport
 from .cache import extract_asset, fetch_asset, sha256_file
@@ -151,6 +151,45 @@ def _write_response(path: Path, arguments: list[str]) -> Path:
     return path
 
 
+def _command_path(path: Path, cwd: Path) -> str:
+    absolute = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(absolute, cwd)
+    except ValueError:
+        # Windows cannot express a relative path across drive letters.
+        return absolute
+    if os.name == "nt" and len(os.path.join(str(cwd), relative)) >= 260:
+        # cl.exe can reject an otherwise valid relative input before collapsing
+        # its ``..`` components when the unresolved spelling reaches MAX_PATH.
+        # The normalized absolute path can be substantially shorter; /pathmap
+        # still removes it from deterministic debug records.
+        return absolute
+    return relative
+
+
+def _stage_link_libraries(libraries: list[Path], build_dir: Path) -> list[Path]:
+    """Give immutable library inputs root-independent linker spellings."""
+    stage_root = build_dir / "link-libraries"
+    staged: list[Path] = []
+    for index, source in enumerate(libraries):
+        destination = stage_root / f"{index:04d}" / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            try:
+                if os.path.samefile(source, destination):
+                    staged.append(destination)
+                    continue
+            except OSError:
+                pass
+            destination.unlink()
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        staged.append(destination)
+    return staged
+
+
 def _run(command: list[str], *, environment: dict[str, str], cwd: Path, label: str) -> str:
     result = subprocess.run(
         command,
@@ -178,12 +217,14 @@ def _compile_source(
     project_root: Path,
     build_dir: Path,
 ) -> tuple[Path, str]:
+    source_argument = _command_path(source, build_dir)
+    object_argument = _command_path(object_path, build_dir)
+    response_argument = _command_path(response_path, build_dir)
     arguments = [
         "/nologo",
         "/c",
         "/O2",
         "/Ob2",
-        "/GL",
         "/Gy",
         "/Gw",
         "/MT",
@@ -192,17 +233,24 @@ def _compile_source(
         "/utf-8",
         "/bigobj",
         "/Brepro",
+        "/experimental:deterministic",
         "/Z7",
+        "/ZH:SHA_256",
+        f"/pathmap:{source.parent}=.pysuture/source",
         f"/pathmap:{project_root}=.",
         f"/pathmap:{build_dir}=.pysuture/build",
-        *[f"/I{directory}" for directory in include_dirs],
+        *[
+            f"/pathmap:{directory}=.pysuture/includes/{index:03d}"
+            for index, directory in enumerate(include_dirs)
+        ],
+        *[f"/I{_command_path(directory, build_dir)}" for directory in include_dirs],
         *[f"/D{definition}" for definition in definitions],
-        f"/Fo{object_path}",
-        str(source),
+        f"/Fo{object_argument}",
+        source_argument,
     ]
     _write_response(response_path, arguments)
     output = _run(
-        [str(toolchain.cl), f"@{response_path}"],
+        [str(toolchain.cl), f"@{response_argument}"],
         environment=toolchain.environment,
         cwd=build_dir,
         label=f"compile {source.name}",
@@ -231,27 +279,100 @@ def _dependency_names(dumpbin_output: str) -> list[str]:
 
 def _classify_main_object_records(
     map_text: str,
-    allowed_pack_libraries: set[str],
+    trusted_object_origins: set[tuple[str, str]],
 ) -> tuple[list[str], list[str]]:
+    main_object_pattern = re.compile(r"(?i)\bmain\.obj\b")
     records = sorted(set(re.findall(r"(?im)^.*\bmain\.obj\b.*$", map_text)))
-    allowed_archive_patterns = [
-        re.compile(
-            rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(Path(name).name[:-4])}(?:\.lib)?[:(]main\.obj(?:\)|\b)"
-        )
-        for name in allowed_pack_libraries
-        if isinstance(name, str) and name.lower().endswith(".lib")
-    ]
+    trusted = {
+        (PureWindowsPath(library).name.casefold(), object_name.casefold())
+        for library, object_name in trusted_object_origins
+        if isinstance(library, str) and isinstance(object_name, str)
+    }
     allowed = []
     forbidden = []
     for record in records:
-        normalized_record = record.casefold()
-        destination = (
-            allowed
-            if any(pattern.search(normalized_record) for pattern in allowed_archive_patterns)
-            else forbidden
+        object_spans = [match.span() for match in main_object_pattern.finditer(record)]
+        token = record.split()[-1]
+        separator = token.rfind(":")
+        drive_separator = (
+            separator == 1
+            and len(token) > 2
+            and token[0].isalpha()
+            and token[2] in "\\/"
         )
+        if separator >= 0 and not drive_separator:
+            library, object_name = token[:separator], token[separator + 1 :]
+        else:
+            parenthesized = re.fullmatch(r"(.+)\(([^()]*)\)", token)
+            if parenthesized is None:
+                library, object_name = "", ""
+            else:
+                library, object_name = parenthesized.groups()
+        library_name = PureWindowsPath(library).name
+        if library_name and not library_name.casefold().endswith(".lib"):
+            library_name += ".lib"
+        origin = (library_name.casefold(), object_name.casefold())
+        destination = allowed if len(object_spans) == 1 and origin in trusted else forbidden
         destination.append(record)
     return allowed, forbidden
+
+
+def _validate_trusted_object_link_inputs(
+    trusted_object_origins: set[tuple[str, str]],
+    *,
+    pack_libraries: list[Path],
+    runtime_libraries: list[Path],
+    system_libraries: list[str],
+) -> None:
+    trusted_libraries = {
+        PureWindowsPath(library).name.casefold()
+        for library, object_name in trusted_object_origins
+        if object_name.casefold() == "main.obj"
+    }
+    if not trusted_libraries:
+        return
+
+    pack_names = [path.name.casefold() for path in pack_libraries]
+    missing_or_duplicated = sorted(
+        name for name in trusted_libraries if pack_names.count(name) != 1
+    )
+    if missing_or_duplicated:
+        raise BuildError(
+            "trusted object origins must identify exactly one selected pack archive: "
+            + ", ".join(missing_or_duplicated)
+        )
+
+    runtime_names = {path.name.casefold() for path in runtime_libraries}
+    system_names = set()
+    for value in system_libraries:
+        text = str(value).strip().strip('"')
+        option = text.casefold()
+        library_option = False
+        if option.startswith(("/defaultlib:", "/wholearchive:")):
+            library_option = True
+            text = text.split(":", 1)[1].strip().strip('"')
+        elif text.startswith("/"):
+            continue
+        name = PureWindowsPath(text).name
+        if library_option and name and not PureWindowsPath(name).suffix:
+            name += ".lib"
+        if name.casefold().endswith(".lib"):
+            system_names.add(name.casefold())
+
+    collisions = []
+    for name in sorted(trusted_libraries):
+        sources = []
+        if name in runtime_names:
+            sources.append("runtime SDK")
+        if name in system_names:
+            sources.append("system libraries")
+        if sources:
+            collisions.append(f"{name} ({' and '.join(sources)})")
+    if collisions:
+        raise BuildError(
+            "trusted object origin basenames collide with non-pack linker inputs: "
+            + ", ".join(collisions)
+        )
 
 
 def audit_executable(
@@ -259,7 +380,7 @@ def audit_executable(
     map_path: Path,
     toolchain: MSVCToolchain,
     *,
-    allowed_pack_libraries: set[str] | None = None,
+    trusted_object_origins: set[tuple[str, str]] | None = None,
 ) -> dict:
     dependents = _run(
         [str(toolchain.dumpbin), "/NOLOGO", "/DEPENDENTS", str(executable)],
@@ -286,7 +407,7 @@ def audit_executable(
     ]
     allowed_main_objects, forbidden_main_objects = _classify_main_object_records(
         map_text,
-        allowed_pack_libraries or set(),
+        trusted_object_origins or set(),
     )
     report = {
         "status": "passed",
@@ -294,7 +415,7 @@ def audit_executable(
         "forbidden_dependencies": forbidden_dependencies,
         "non_system_dependencies": non_system_dependencies,
         "forbidden_entry_symbols": forbidden_symbols,
-        "allowed_pack_main_object_records": allowed_main_objects,
+        "allowed_trusted_object_records": allowed_main_objects,
         "forbidden_main_object_records": forbidden_main_objects,
         "executable_sha256": sha256_file(executable),
     }
@@ -388,6 +509,7 @@ def build_executable(
     wholearchive_paths: list[Path] = []
     system_libraries: list[str] = []
     suppressed_system_libraries: list[str] = []
+    trusted_object_origins: set[tuple[str, str]] = set()
     for locked_record, pack_root, metadata in assets.packs:
         symbol = metadata.get("descriptor_symbol")
         if not isinstance(symbol, str) or not symbol:
@@ -418,6 +540,10 @@ def build_executable(
             wholearchive_paths.append(path)
         system_libraries.extend(metadata.get("system_libraries", []))
         suppressed_system_libraries.extend(metadata.get("suppressed_system_libraries", []))
+        trusted_object_origins.update(
+            (record["library"], record["object"])
+            for record in metadata.get("trusted_object_origins", [])
+        )
 
     wholearchive_paths = list(dict.fromkeys(wholearchive_paths))
 
@@ -449,9 +575,8 @@ def build_executable(
 
     def compile_job(job: tuple[Path, tuple[str, ...], str]):
         source, definitions, label = job
-        digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
-        object_path = object_dir / f"{label}-{digest}.obj"
-        response_path = response_dir / f"{label}-{digest}.rsp"
+        object_path = object_dir / f"{label}.obj"
+        response_path = response_dir / f"{label}.rsp"
         result_path, output_text = _compile_source(
             toolchain,
             source,
@@ -478,15 +603,35 @@ def build_executable(
     system_libraries.extend(assets.runtime_metadata.get("system_libraries", []))
     system_libraries.extend(REQUIRED_WINDOWS_SYSTEM_LIBRARIES)
     system_libraries = _resolve_system_libraries(system_libraries, suppressed_system_libraries)
+    _validate_trusted_object_link_inputs(
+        trusted_object_origins,
+        pack_libraries=pack_libraries,
+        runtime_libraries=runtime_libraries,
+        system_libraries=system_libraries,
+    )
+
+    original_link_libraries = [*pack_libraries, *runtime_libraries]
+    staged_link_libraries = _stage_link_libraries(original_link_libraries, build_dir)
+    staged_by_source = {
+        source.resolve(): staged
+        for source, staged in zip(original_link_libraries, staged_link_libraries, strict=True)
+    }
+    pack_library_count = len(pack_libraries)
+    staged_pack_libraries = staged_link_libraries[:pack_library_count]
+    staged_runtime_libraries = staged_link_libraries[pack_library_count:]
+    staged_wholearchive_paths = [
+        staged_by_source[path.resolve()]
+        for path in wholearchive_paths
+    ]
 
     executable = build_dir / f"{output_name}.exe"
     map_path = build_dir / f"{output_name}.map"
     pdb_path = build_dir / f"{output_name}.pdb"
     link_arguments = [
         "/NOLOGO",
-        f"/OUT:{executable}",
-        f"/MAP:{map_path}",
-        f"/PDB:{pdb_path}",
+        f"/OUT:{_command_path(executable, build_dir)}",
+        f"/MAP:{_command_path(map_path, build_dir)}",
+        f"/PDB:{_command_path(pdb_path, build_dir)}",
         "/PDBALTPATH:%_PDB%",
         "/DEBUG:FULL",
         "/LTCG",
@@ -499,15 +644,18 @@ def build_executable(
         "/HIGHENTROPYVA",
         "/Brepro",
         f"/SUBSYSTEM:{'WINDOWS' if selected_mode == 'windowed' else 'CONSOLE'}",
-        *[str(path) for path in object_paths],
-        *[str(path) for path in pack_libraries],
-        *[str(path) for path in runtime_libraries],
-        *[f"/WHOLEARCHIVE:{path}" for path in wholearchive_paths],
+        *[_command_path(path, build_dir) for path in object_paths],
+        *[_command_path(path, build_dir) for path in staged_pack_libraries],
+        *[_command_path(path, build_dir) for path in staged_runtime_libraries],
+        *[
+            f"/WHOLEARCHIVE:{_command_path(path, build_dir)}"
+            for path in staged_wholearchive_paths
+        ],
         *system_libraries,
     ]
     link_response = _write_response(response_dir / "link.rsp", link_arguments)
     link_log = _run(
-        [str(toolchain.link), f"@{link_response}"],
+        [str(toolchain.link), f"@{_command_path(link_response, build_dir)}"],
         environment=toolchain.environment,
         cwd=build_dir,
         label="link executable",
@@ -518,7 +666,7 @@ def build_executable(
         executable,
         map_path,
         toolchain,
-        allowed_pack_libraries={path.name for path in pack_libraries},
+        trusted_object_origins=trusted_object_origins,
     )
     dist_dir = config.root / "dist"
     dist_dir.mkdir(parents=True, exist_ok=True)

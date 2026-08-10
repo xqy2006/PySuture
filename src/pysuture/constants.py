@@ -11,8 +11,10 @@ SUPPORTED_PYTHON_SERIES = ("3.11", "3.12", "3.13", "3.14", "3.15")
 SUPPORTED_PLATFORM = "windows-x64"
 SECRET_BASENAMES = {
     ".env",
+    ".netrc",
     ".npmrc",
     ".pypirc",
+    "_netrc",
     "credentials",
     "credentials.json",
     "id_dsa",
@@ -21,4 +23,4 @@ SECRET_BASENAMES = {
     "id_rsa",
     "service-account.json",
 }
-SECRET_SUFFIXES = {".key", ".p12", ".pfx", ".pem"}
+SECRET_SUFFIXES = {".jks", ".key", ".keystore", ".p12", ".pfx", ".ppk"}
